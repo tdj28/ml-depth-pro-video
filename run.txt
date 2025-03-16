@@ -1,1 +1,21 @@
 python video3D.py --image_path TEMP/FRAMES/output_0243.png
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --shadow_threshold 0.15 
+
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --ground_params_dir ./TEMP
+
+#########################################################################################
+
+
+# First run - detects and saves ground plane
+python mesh_from_depth.py --image_path my_image.jpg
+
+# Second run - loads saved ground plane and applies a 10-degree rotation around X axis
+python mesh_from_depth.py --image_path my_image.jpg --rot_x -10
+
+# Force re-detection of ground plane
+python mesh_from_depth.py --image_path my_image.jpg --no_saved_ground
+
+# Save ground plane parameters to a custom directory
+python mesh_from_depth.py --image_path my_image.jpg --ground_params_dir ./ground_params
