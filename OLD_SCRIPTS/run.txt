@@ -1,0 +1,52 @@
+python video3D.py --image_path TEMP/FRAMES/output_0243.png
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --shadow_threshold 0.15 
+
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --ground_params_dir ./TEMP 
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP -force_horizontal --perfectly_flat
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP --visualize_ground
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP
+
+
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --no_saved_ground --ground_params_dir ./TEMP --normalize_ground  --grid_adjust
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --normalize_ground --grid_adjust --fast --downsample 3
+
+python mesh_from_depth.py --image_path test_images/room.jpg --output room_mesh.glb --use_ground_file --save_ground_file --visualize_ground | cat
+
+ml-depth-pro-video % python create_floor_plan.py --image_path TEMP/FRAMES/output_0243.png --simplified --color_by_height
+
+
+python image_to_ground_normalized_pointcloud.py --image_path TEMP/FRAMES/output_0243.png --visualize --output_path test.ply 
+
+python image_to_ground_normalized_pointcloud.py --image_path TEMP/FRAMES/output_0243.png --visualize --output_path test.ply --downsample 4
+
+#########################################################################################
+
+
+# First run - detects and saves ground plane
+python mesh_from_depth.py --image_path my_image.jpg
+
+# Second run - loads saved ground plane and applies a 10-degree rotation around X axis
+python mesh_from_depth.py --image_path my_image.jpg --rot_x -10
+
+# Force re-detection of ground plane
+python mesh_from_depth.py --image_path my_image.jpg --no_saved_ground
+
+# Save ground plane parameters to a custom directory
+python mesh_from_depth.py --image_path my_image.jpg --ground_params_dir ./ground_params
+
+
+############################
+
+
+python image_to_ground_normalized_pointcloud.py --image_path TEMP/FRAMES/output_0243.png --visualize --output_path test.ply               
+
+DOES NOT return the same thing as 
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --no_saved_ground --ground_params_dir ./TEMP --normalize_ground  --grid_adjust

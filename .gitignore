@@ -201,3 +201,13 @@ wandb/
 mlruns/.DS_Store
 */.DS_Store
 .DS_Store
+
+*.ply
+*.glb
+*.glb.gz
+*.ply.gz
+*.ply.gz.part
+*.ply.gz.part.1
+*.ply.gz.part.2
+
+*.png
