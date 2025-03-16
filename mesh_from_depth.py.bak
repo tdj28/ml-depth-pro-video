@@ -854,10 +854,10 @@ def detect_ground_plane(depth_map, threshold=0.05, max_iterations=500, lower_reg
         sampled_depths = depth_map[y_coords, x_coords]
         
         # Filter out invalid depths
-        valid_depth_mask = ~np.isnan(sampled_depths) & (sampled_depths > 0)
-        y_img = y_coords[valid_depth_mask]
-        x_img = x_coords[valid_depth_mask]
-        z = sampled_depths[valid_depth_mask]
+        valid_mask = ~np.isnan(sampled_depths) & (sampled_depths > 0)
+        y_img = y_coords[valid_mask]
+        x_img = x_coords[valid_mask]
+        z = sampled_depths[valid_mask]
         
         # If we still have too many points, randomly subsample
         if len(z) > max_points:
@@ -1253,211 +1253,114 @@ def force_horizontal_ground(ground_model, max_angle=5.0, completely_flat=False):
     
     return adjusted_model
 
-def grid_based_ground_plane_fit(points_3d, initial_ground_model=None, grid_size=100, visualize=False, force_horizontal=False):
+def grid_based_ground_plane_fit(points_3d, initial_ground_model=None, grid_size=1000, visualize=False):
     """
-    Ground plane fitting using Z-binning approach:
-    1. Divide the depth (Z-axis) into bins
-    2. For each Z-bin, find the lowest points (in Y-axis) and use them as ground trace
-    3. Fit a plane to these ground trace points, preferring a horizontal solution
+    Grid-based ground plane fitting:
+    1. Break the XZ plane into a grid
+    2. Find the lowest point in each grid cell
+    3. Fit a plane to these lowest points using RANSAC
     
     Args:
         points_3d: Nx3 array of 3D points
         initial_ground_model: Optional initial ground plane model (ignored)
-        grid_size: Number of bins for the Z direction
+        grid_size: Size of the grid (grid_size x grid_size)
         visualize: Whether to visualize the fitting process
-        force_horizontal: Whether to force the ground plane to be horizontal
         
     Returns:
-        fitted_ground_model: Ground plane model fitted to the ground trace
+        fitted_ground_model: Ground plane model fitted to the lowest points
     """
     # Ensure points_3d is a numpy array
     points_3d = np.asarray(points_3d)
     valid_points = ~np.isnan(points_3d).any(axis=1)
     points = points_3d[valid_points]
     
-    print(f"Z-binning ground plane fitting with {len(points)} points...")
+    print(f"Grid-based ground plane fitting with {len(points)} points...")
     
-    # Extract coordinates
+    # Get the X and Z coordinates
     x_coords = points[:, 0]
-    y_coords = points[:, 1]  # Y is now up, fixed in depth_to_3d
     z_coords = points[:, 2]
     
-    # Calculate Z range for binning
+    # Calculate the bounds of the scene
+    x_min, x_max = np.min(x_coords), np.max(x_coords)
     z_min, z_max = np.min(z_coords), np.max(z_coords)
-    z_range = z_max - z_min
     
-    # Create bins in the Z direction
-    n_bins = grid_size
-    bin_size = z_range / n_bins
+    # Calculate the cell size
+    x_cell_size = (x_max - x_min) / grid_size
+    z_cell_size = (z_max - z_min) / grid_size
     
-    print(f"Z range: [{z_min:.2f}, {z_max:.2f}], using {n_bins} bins of size {bin_size:.2f}m")
+    print(f"Scene bounds: X: [{x_min:.2f}, {x_max:.2f}], Z: [{z_min:.2f}, {z_max:.2f}]")
+    print(f"Grid cell size: {x_cell_size:.3f} x {z_cell_size:.3f} meters")
     
-    # Initialize arrays to store ground trace points
-    ground_trace_points = []
+    # Initialize grid to store lowest points
+    lowest_points = []
     
-    # For each Z bin, find the lowest Y points (ground level)
-    for i in range(n_bins):
-        # Calculate bin boundaries
-        bin_z_min = z_min + i * bin_size
-        bin_z_max = z_min + (i + 1) * bin_size
-        
-        # Find points in this Z bin
-        bin_mask = (z_coords >= bin_z_min) & (z_coords < bin_z_max)
-        bin_points = points[bin_mask]
-        
-        if len(bin_points) > 10:  # Enough points for analysis
-            # Sort by Y coordinate (height)
-            sorted_indices = np.argsort(bin_points[:, 1])
+    # Find the lowest point in each grid cell
+    for i in range(grid_size):
+        for j in range(grid_size):
+            # Calculate the bounds of this cell
+            cell_x_min = x_min + i * x_cell_size
+            cell_x_max = x_min + (i + 1) * x_cell_size
+            cell_z_min = z_min + j * z_cell_size
+            cell_z_max = z_min + (j + 1) * z_cell_size
             
-            # Take the lowest 5% of points in this bin
-            n_lowest = max(1, int(0.05 * len(bin_points)))
-            lowest_points = bin_points[sorted_indices[:n_lowest]]
+            # Find points in this cell
+            cell_mask = (
+                (x_coords >= cell_x_min) & (x_coords < cell_x_max) &
+                (z_coords >= cell_z_min) & (z_coords < cell_z_max)
+            )
             
-            # Calculate the average of these lowest points
-            avg_point = np.mean(lowest_points, axis=0)
-            ground_trace_points.append(avg_point)
+            # If there are points in this cell, find the lowest one
+            if np.any(cell_mask):
+                cell_points = points[cell_mask]
+                # Find the point with the lowest Y coordinate
+                lowest_idx = np.argmin(cell_points[:, 1])
+                lowest_point = cell_points[lowest_idx]
+                lowest_points.append(lowest_point)
     
-    ground_trace_points = np.array(ground_trace_points)
-    print(f"Found {len(ground_trace_points)} ground trace points from Z bins")
+    lowest_points = np.array(lowest_points)
+    print(f"Found {len(lowest_points)} lowest points from the grid")
     
-    if len(ground_trace_points) < 10:
-        print("Warning: Too few ground trace points. Using fallback approach.")
-        # Fall back to lowest 5% of all points by Y
-        sorted_indices = np.argsort(y_coords)
-        n_lowest = max(10, int(0.05 * len(points)))
-        ground_trace_points = points[sorted_indices[:n_lowest]]
+    if len(lowest_points) < 10:
+        print("Warning: Too few grid cells with points. Using lowest 1% of all points.")
+        # Fall back to using the lowest 1% of all points
+        heights = points[:, 1]
+        sorted_indices = np.argsort(heights)
+        num_lowest = max(10, int(0.01 * len(points)))
+        lowest_points = points[sorted_indices[:num_lowest]]
     
-    # Now we have ground trace points, let's decide how to fit them
+    # Use RANSAC to fit a plane to the lowest points
+    X_train = lowest_points[:, [0, 2]]  # X and Z coordinates
+    y_train = lowest_points[:, 1]  # Y coordinate (height)
     
-    # STEP 1: First try to fit a plane to all ground trace points
-    if force_horizontal:
-        # For horizontal plane, just take the average Y value of ground trace points
-        # as the height of the plane
-        normal = np.array([0, 1, 0])  # Y-up
-        avg_y = np.mean(ground_trace_points[:, 1])
-        d_plane = -avg_y
-        
-        print(f"Forcing horizontal plane at Y = {avg_y:.4f}")
-    else:
-        # For sloped plane, try RANSAC first (more robust to outliers)
-        # We'll find the best plane that follows the ground trace points
-        
-        # Prepare data for RANSAC: Z is independent, Y is target
-        if len(ground_trace_points) >= 10:
-            try:
-                from sklearn.linear_model import RANSACRegressor
-                
-                # Extract X, Z, Y coordinates - Y is the target
-                X_data = ground_trace_points[:, [0, 2]]  # X and Z coordinates
-                y_data = ground_trace_points[:, 1]       # Y coordinates
-                
-                # Use RANSAC for robust fitting - find relationship Y = f(X,Z)
-                ransac = RANSACRegressor(min_samples=10, max_trials=1000, residual_threshold=0.1)
-                ransac.fit(X_data, y_data)
-                
-                # Extract coefficients - these define our plane
-                # y = a*x + c*z + d, which means normal = [a, -1, c]
-                a = ransac.estimator_.coef_[0]  # X coefficient
-                c = ransac.estimator_.coef_[1]  # Z coefficient
-                d = ransac.estimator_.intercept_  # Intercept
-                
-                # Convert to plane equation: ax + by + cz + d = 0
-                # We have: y = a*x + c*z + d, which rearranges to: -a*x + y - c*z - d = 0
-                normal = np.array([-a, 1, -c])
-                d_plane = -d
-                
-                # Normalize the normal vector
-                normal = normal / np.linalg.norm(normal)
-                
-                # Calculate the angle with the horizontal
-                horizontal_vector = np.array([0, 1, 0])  # Y-up
-                cos_angle = np.abs(np.dot(normal, horizontal_vector))
-                angle_degrees = np.arccos(cos_angle) * 180 / np.pi
-                
-                print(f"RANSAC fit with angle {angle_degrees:.2f}° from horizontal")
-                
-                # If the angle is too steep (> 20 degrees), use a more horizontal approach
-                if angle_degrees > 20:
-                    print(f"Plane angle {angle_degrees:.2f}° exceeds threshold. Using fallback horizontal fit.")
-                    normal = np.array([0, 1, 0])  # Y-up
-                    avg_y = np.median(ground_trace_points[:, 1])
-                    d_plane = -avg_y
-            except Exception as e:
-                print(f"RANSAC fitting error: {e}. Using simple least squares.")
-                # Fallback to simple least squares fit
-                try:
-                    # Fit a plane using least squares: y = ax + cz + d
-                    A = np.column_stack((ground_trace_points[:, 0], ground_trace_points[:, 2], np.ones(len(ground_trace_points))))
-                    b = ground_trace_points[:, 1]
-                    
-                    x, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
-                    a, c, d = x
-                    
-                    # Convert to plane equation: ax + by + cz + d = 0
-                    # We have: y = ax + cz + d, which rearranges to: -ax + y - cz - d = 0
-                    normal = np.array([-a, 1, -c])
-                    d_plane = -d
-                    
-                    # Normalize the normal vector
-                    normal = normal / np.linalg.norm(normal)
-                    
-                    # Calculate the angle with the horizontal
-                    horizontal_vector = np.array([0, 1, 0])  # Y-up
-                    cos_angle = np.abs(np.dot(normal, horizontal_vector))
-                    angle_degrees = np.arccos(cos_angle) * 180 / np.pi
-                    
-                    print(f"Least squares fit with angle {angle_degrees:.2f}° from horizontal")
-                    
-                    # If the angle is too steep (> 20 degrees), use a more horizontal approach
-                    if angle_degrees > 20:
-                        print(f"Plane angle {angle_degrees:.2f}° exceeds threshold. Using horizontal fit.")
-                        normal = np.array([0, 1, 0])  # Y-up
-                        avg_y = np.median(ground_trace_points[:, 1])
-                        d_plane = -avg_y
-                except np.linalg.LinAlgError:
-                    print("Error in least squares fit. Using horizontal plane.")
-                    normal = np.array([0, 1, 0])  # Y-up
-                    avg_y = np.median(ground_trace_points[:, 1])
-                    d_plane = -avg_y
-        else:
-            # Not enough points for RANSAC, use simple horizontal plane
-            print("Too few ground trace points for robust fitting. Using horizontal plane.")
-            normal = np.array([0, 1, 0])  # Y-up
-            avg_y = np.median(ground_trace_points[:, 1])
-            d_plane = -avg_y
+    # Fit a plane using RANSAC
+    ransac = RANSACRegressor(random_state=42, max_trials=100, residual_threshold=0.05)
+    ransac.fit(X_train, y_train)
     
-    # Ensure normal points up (Y positive)
-    if normal[1] < 0:
+    # Get the plane parameters
+    a, b = ransac.estimator_.coef_  # Coefficients for X and Z
+    c = ransac.estimator_.intercept_  # Intercept
+    
+    # Convert to plane equation: ax + by + cz + d = 0
+    # Our fit gives us: y = ax + bz + c
+    # Rearranging: -y + ax + bz + c = 0
+    normal = np.array([a, -1, b])
+    d = c
+    
+    # Normalize the normal vector
+    normal = normal / np.linalg.norm(normal)
+    
+    # Make sure normal points "up" (-Y in camera space)
+    if normal[1] > 0:
         normal = -normal
-        d_plane = -d_plane
-    
-    # STEP 2: Ensure no points go below the plane
-    # Calculate signed distances to the plane
-    signed_distances = np.dot(points, normal) + d_plane
-    
-    # Check if there are points below the plane
-    points_below = np.sum(signed_distances < 0)
-    if points_below > 0:
-        print(f"Found {points_below} points below the plane. Adjusting plane down.")
-        
-        # Find the minimum signed distance
-        min_distance = np.min(signed_distances)
-        
-        # Adjust d to move the plane down
-        d_plane -= (min_distance + 0.05)  # Add a small safety margin
-        
-        # Recalculate points below
-        signed_distances = np.dot(points, normal) + d_plane
-        points_below = np.sum(signed_distances < 0)
-        print(f"After adjustment: {points_below} points below the plane")
+        d = -d
     
     # Calculate statistics about the fit
-    horizontal_vector = np.array([0, 1, 0])  # Y-up
+    horizontal_vector = np.array([0, -1, 0])  # Y-up
     cos_angle = np.abs(np.dot(normal, horizontal_vector))
     angle_degrees = np.arccos(cos_angle) * 180 / np.pi
     
-    # Calculate signed distances and inliers for reporting purposes
-    signed_distances = np.dot(points, normal) + d_plane
+    # Calculate signed distances and inliers
+    signed_distances = np.dot(points, normal) + d
     inliers = np.abs(signed_distances) < 0.1  # Within 10cm of the plane
     num_inliers = np.sum(inliers)
     
@@ -1469,19 +1372,18 @@ def grid_based_ground_plane_fit(points_3d, initial_ground_model=None, grid_size=
     # Create the final ground model
     fitted_model = {
         'normal': normal,
-        'd': d_plane,
-        'origin': np.array([0, -d_plane / normal[1] if normal[1] != 0 else 0, 0])  # A point on the plane
+        'd': d,
+        'origin': np.array([0, -d / normal[1] if normal[1] != 0 else 0, 0])  # A point on the plane
     }
     
     # Visualize if requested
     if visualize:
-        print("SHOWING 3D VISUALIZATION WITH RED SPHERES - PLEASE WAIT...")
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
         
-        fig = plt.figure(figsize=(15, 12))
+        fig = plt.figure(figsize=(15, 10))
         
-        # 3D visualization - full scene
+        # 3D visualization
         ax1 = fig.add_subplot(221, projection='3d')
         
         # Sample points for visualization (max 5000)
@@ -1492,13 +1394,17 @@ def grid_based_ground_plane_fit(points_3d, initial_ground_model=None, grid_size=
             viz_points = points
             
         # Visualize all points
-        ax1.scatter(viz_points[:, 0], viz_points[:, 2], viz_points[:, 1], c='blue', alpha=0.1, s=1)
+        ax1.scatter(viz_points[:, 0], viz_points[:, 2], viz_points[:, 1], c='blue', alpha=0.3, s=1)
         
-        # Highlight the ground trace points with RED SPHERES
-        ax1.scatter(ground_trace_points[:, 0], ground_trace_points[:, 2], ground_trace_points[:, 1], 
-                   c='red', alpha=1.0, s=100, marker='o')
-        
-        print(f"Added {len(ground_trace_points)} RED SPHERES to visualization")
+        # Highlight the lowest points used for fitting
+        if len(lowest_points) > 5000:
+            lowest_viz_indices = np.random.choice(len(lowest_points), 5000, replace=False)
+            lowest_viz_points = lowest_points[lowest_viz_indices]
+        else:
+            lowest_viz_points = lowest_points
+            
+        ax1.scatter(lowest_viz_points[:, 0], lowest_viz_points[:, 2], lowest_viz_points[:, 1], 
+                   c='red', alpha=0.8, s=3)
         
         # Draw the ground plane
         min_x, max_x = np.min(viz_points[:, 0]), np.max(viz_points[:, 0])
@@ -1508,102 +1414,90 @@ def grid_based_ground_plane_fit(points_3d, initial_ground_model=None, grid_size=
         
         # Calculate Y values for the plane at each X,Z coordinate
         if abs(normal[1]) > 1e-6:  # Avoid division by zero
-            yy = (-normal[0] * xx - normal[2] * zz - d_plane) / normal[1]
+            yy = (-normal[0] * xx - normal[2] * zz - d) / normal[1]
         else:
             yy = np.zeros_like(xx)
             
         ax1.plot_surface(xx, zz, yy, alpha=0.3, color='green')
         
         ax1.set_xlabel('X')
-        ax1.set_ylabel('Z (depth)')
-        ax1.set_zlabel('Y (height)')
+        ax1.set_ylabel('Z')
+        ax1.set_zlabel('Y')
         ax1.set_title('Point Cloud with Fitted Ground Plane')
         
-        # Close-up view of Z-bins and ground trace
-        ax2 = fig.add_subplot(222, projection='3d')
+        # Top-down view (XZ plane) with grid
+        ax2 = fig.add_subplot(222)
         
-        # Only show the lowest 30% of the scene in Y direction
-        all_y = viz_points[:, 1]
-        y_threshold = np.percentile(all_y, 30)  # Show bottom 30% of points
-        bottom_mask = all_y < y_threshold
-        bottom_points = viz_points[bottom_mask]
+        # Plot all points from top down
+        ax2.scatter(viz_points[:, 0], viz_points[:, 2], c='blue', alpha=0.1, s=1)
         
-        # Display all bottom points lightly
-        if len(bottom_points) > 0:
-            ax2.scatter(bottom_points[:, 0], bottom_points[:, 2], bottom_points[:, 1], 
-                      c='blue', alpha=0.1, s=1)
+        # Plot the lowest points
+        ax2.scatter(lowest_viz_points[:, 0], lowest_viz_points[:, 2], c='red', alpha=0.5, s=3)
         
-        # RED SPHERES for ground trace points
-        ax2.scatter(ground_trace_points[:, 0], ground_trace_points[:, 2], ground_trace_points[:, 1], 
-                  c='red', alpha=1.0, s=100, marker='o')
+        # Draw grid lines if there aren't too many
+        if grid_size <= 50:  # Only draw grid lines for reasonable grid sizes
+            # Draw grid lines
+            for i in range(grid_size + 1):
+                x_line = x_min + i * x_cell_size
+                z_line = z_min + i * z_cell_size
+                
+                # Vertical grid lines
+                if x_line <= x_max:
+                    ax2.axvline(x=x_line, color='gray', alpha=0.3, linestyle=':')
+                
+                # Horizontal grid lines
+                if z_line <= z_max:
+                    ax2.axhline(y=z_line, color='gray', alpha=0.3, linestyle=':')
         
-        # Draw the Z-bin boundaries
-        for i in range(n_bins+1):
-            z_line = z_min + i * bin_size
-            if z_line <= z_max:
-                # Draw a vertical line at this Z position
-                if abs(normal[1]) > 1e-6:
-                    y_at_points = (-normal[0] * np.array([min_x, max_x]) - normal[2] * z_line - d_plane) / normal[1]
-                else:
-                    y_at_points = np.array([0, 0])
-                    
-                ax2.plot([min_x, max_x], [z_line, z_line], y_at_points, 'k-', alpha=0.1)
-        
-        # Draw the ground plane
-        ax2.plot_surface(xx, zz, yy, alpha=0.3, color='green')
-        
-        # Set a good viewpoint to see Z-bins and ground trace
-        ax2.view_init(elev=35, azim=-60)
+        ax2.set_title('Top-Down View (XZ Plane) with Grid Lowest Points')
         ax2.set_xlabel('X')
-        ax2.set_ylabel('Z (depth)')
-        ax2.set_zlabel('Y (height)')
-        ax2.set_title('RED SPHERES: Ground Trace Points')
+        ax2.set_ylabel('Z')
+        ax2.grid(False)
+        ax2.set_aspect('equal')
         
         # Side view (XY plane)
         ax3 = fig.add_subplot(223)
-        ax3.scatter(viz_points[:, 0], viz_points[:, 1], c='blue', alpha=0.1, s=1)
-        ax3.scatter(ground_trace_points[:, 0], ground_trace_points[:, 1], 
-                   c='red', alpha=0.8, s=15)
+        ax3.scatter(viz_points[:, 0], viz_points[:, 1], c='blue', alpha=0.3, s=1)
+        ax3.scatter(lowest_viz_points[:, 0], lowest_viz_points[:, 1], 
+                   c='red', alpha=0.8, s=3)
         
         # Draw the sloped ground plane in X-Y projection
         x_range = np.linspace(min_x, max_x, 100)
         if abs(normal[1]) > 1e-6:  # Avoid division by zero
             # For each X, get Y when Z=0 (middle of the scene)
             middle_z = (min_z + max_z) / 2
-            y_line = (-normal[0] * x_range - normal[2] * middle_z - d_plane) / normal[1]
+            y_line = (-normal[0] * x_range - normal[2] * middle_z - d) / normal[1]
         else:
             y_line = np.full_like(x_range, fitted_model['origin'][1])
             
-        ax3.plot(x_range, y_line, 'g-', linewidth=2, label=f'Fitted Plane ({angle_degrees:.1f}°)')
+        ax3.plot(x_range, y_line, 'g-', linewidth=2)
         
         ax3.set_title('Side View (XY Plane) with Ground Level')
         ax3.set_xlabel('X')
         ax3.set_ylabel('Y (height)')
         ax3.grid(True)
-        ax3.legend()
         
         # Front view (ZY plane)
         ax4 = fig.add_subplot(224)
-        ax4.scatter(viz_points[:, 2], viz_points[:, 1], c='blue', alpha=0.1, s=1)
-        ax4.scatter(ground_trace_points[:, 2], ground_trace_points[:, 1], 
-                   c='red', alpha=0.8, s=15)
+        ax4.scatter(viz_points[:, 2], viz_points[:, 1], c='blue', alpha=0.3, s=1)
+        ax4.scatter(lowest_viz_points[:, 2], lowest_viz_points[:, 1], 
+                   c='red', alpha=0.8, s=3)
         
         # Draw the sloped ground plane in Z-Y projection
         z_range = np.linspace(min_z, max_z, 100)
         if abs(normal[1]) > 1e-6:  # Avoid division by zero
             # For each Z, get Y when X=0 (middle of the scene)
             middle_x = (min_x + max_x) / 2
-            y_line = (-normal[0] * middle_x - normal[2] * z_range - d_plane) / normal[1]
+            y_line = (-normal[0] * middle_x - normal[2] * z_range - d) / normal[1]
         else:
             y_line = np.full_like(z_range, fitted_model['origin'][1])
             
-        ax4.plot(z_range, y_line, 'g-', linewidth=2, label=f'Fitted Plane ({angle_degrees:.1f}°)')
+        ax4.plot(z_range, y_line, 'g-', linewidth=2)
         
         ax4.set_title('Front View (ZY Plane) with Ground Level')
-        ax4.set_xlabel('Z (depth)')
+        ax4.set_xlabel('Z')
         ax4.set_ylabel('Y (height)')
         ax4.grid(True)
-        ax4.legend()
         
         plt.tight_layout()
         plt.show()
@@ -1613,7 +1507,7 @@ def grid_based_ground_plane_fit(points_3d, initial_ground_model=None, grid_size=
 def remove_depth_shadows(depth_map, image=None, threshold_factor=0.2, min_region_size=100, interpolate_ground=True, 
                      image_path=None, use_saved_ground=True, rotation_offset=None, ground_params_dir=None, 
                      optimize_ground=True, force_horizontal=False, max_ground_angle=5.0, perfectly_flat_ground=False,
-                     use_smart_ground_fit=True, visualize_ground=False):
+                     use_smart_ground_fit=True):
     """
     Remove shadow artifacts from depth maps by detecting abrupt depth changes.
     Optionally interpolate ground plane in shadow areas.
@@ -1632,8 +1526,7 @@ def remove_depth_shadows(depth_map, image=None, threshold_factor=0.2, min_region
         force_horizontal: Whether to force the ground plane to be more horizontal
         max_ground_angle: Maximum allowed angle with horizontal plane in degrees
         perfectly_flat_ground: If True, make the plane perfectly horizontal
-        use_smart_ground_fit: Whether to use the Z-binning ground plane fitting approach (default True)
-        visualize_ground: Whether to visualize the ground plane fitting process
+        use_smart_ground_fit: Whether to use the grid-based ground plane fitting (default now True)
     
     Returns:
         filtered_depth: Depth map with shadows removed
@@ -1695,11 +1588,11 @@ def remove_depth_shadows(depth_map, image=None, threshold_factor=0.2, min_region
                     focallength_px = max(w, h)
                     
                     # Convert to 3D points
-                    points_3d, _ = depth_to_3d(depth_map, focallength_px, w, h)
+                    points_3d = depth_to_3d(x_indices, y_indices, depths, focallength_px)
                     
                     # Apply grid-based ground plane fitting
                     print(f"Using grid-based ground plane fitting with {len(points_3d)} points...")
-                    ground_model = grid_based_ground_plane_fit(points_3d, ground_model, visualize=visualize_ground, force_horizontal=force_horizontal)
+                    ground_model = grid_based_ground_plane_fit(points_3d, ground_model, visualize=False)
                 # Optimize ground plane if requested
                 elif optimize_ground:
                     # Get 3D points for optimization
@@ -1783,11 +1676,11 @@ def remove_depth_shadows(depth_map, image=None, threshold_factor=0.2, min_region
                     focallength_px = max(w, h)
                     
                     # Convert to 3D points
-                    points_3d, _ = depth_to_3d(depth_map, focallength_px, w, h)
+                    points_3d = depth_to_3d(x_indices, y_indices, depths, focallength_px)
                     
                     # Apply grid-based ground plane fitting
                     print(f"Using grid-based ground plane fitting with {len(points_3d)} points...")
-                    ground_model = grid_based_ground_plane_fit(points_3d, ground_model, visualize=visualize_ground, force_horizontal=force_horizontal)
+                    ground_model = grid_based_ground_plane_fit(points_3d, ground_model, visualize=False)
                 
                 # Apply rotation offset if provided
                 if rotation_offset is not None and len(rotation_offset) == 3:
@@ -1831,11 +1724,11 @@ def remove_depth_shadows(depth_map, image=None, threshold_factor=0.2, min_region
                 focallength_px = max(w, h)
                 
                 # Convert to 3D points
-                points_3d, _ = depth_to_3d(depth_map, focallength_px, w, h)
+                points_3d = depth_to_3d(x_indices, y_indices, depths, focallength_px)
                 
                 # Apply grid-based ground plane fitting
                 print(f"Using grid-based ground plane fitting with {len(points_3d)} points...")
-                ground_model = grid_based_ground_plane_fit(points_3d, ground_model, visualize=visualize_ground, force_horizontal=force_horizontal)
+                ground_model = grid_based_ground_plane_fit(points_3d, ground_model, visualize=False)
             
             # Apply rotation offset if provided
             if rotation_offset is not None and len(rotation_offset) == 3:
@@ -2313,9 +2206,7 @@ def create_mesh_from_video3d_pointcloud(image_path, output_path=None, visualize=
                                         interpolate_ground=True, remove_strays=True, visualize_ground=False,
                                         add_ground_plane=True, use_saved_ground=True, rotation_offset=None,
                                         ground_params_dir=None, force_horizontal=False, max_ground_angle=5.0,
-                                        perfectly_flat_ground=False, use_smart_ground_fit=False,
-                                        normalize_ground_to_zero=False, grid_adjust_ground=False, 
-                                        grid_size=20, ground_percentile=5):
+                                        perfectly_flat_ground=False, use_smart_ground_fit=False):
     """
     Create a mesh directly from the exact same point cloud as video3D.py.
     This function first creates the point cloud exactly as in video3D.py,
@@ -2336,15 +2227,12 @@ def create_mesh_from_video3d_pointcloud(image_path, output_path=None, visualize=
         force_horizontal: Whether to force the ground plane to be more horizontal
         max_ground_angle: Maximum allowed angle with horizontal plane in degrees
         perfectly_flat_ground: If True, make the plane perfectly horizontal
-        use_smart_ground_fit: Whether to use the grid-based ground plane fitting
-        normalize_ground_to_zero: Whether to normalize coordinates so ground plane is at y=0
-        grid_adjust_ground: Whether to use grid-based approach to ensure points touch ground
-        grid_size: Number of grid cells in each dimension for grid adjustment
-        ground_percentile: Percentile of lowest points to consider for grid adjustment
+        use_smart_ground_fit: Whether to use the smart grid-based ground plane fitting
     
     Returns:
-        None
+        o3d.geometry.TriangleMesh: The created mesh
     """
+    # First, create the point cloud exactly as in video3D.py
     # Load model and preprocessing transform
     model, transform = depth_pro.create_model_and_transforms()
     model.eval()
@@ -2376,8 +2264,7 @@ def create_mesh_from_video3d_pointcloud(image_path, output_path=None, visualize=
             force_horizontal=force_horizontal,
             max_ground_angle=max_ground_angle,
             perfectly_flat_ground=perfectly_flat_ground,
-            use_smart_ground_fit=use_smart_ground_fit,
-            visualize_ground=visualize_ground
+            use_smart_ground_fit=use_smart_ground_fit
         )
         
         # Visualize ground detection if requested
@@ -2390,183 +2277,105 @@ def create_mesh_from_video3d_pointcloud(image_path, output_path=None, visualize=
     # Calculate principal point (assuming center of image)
     cx, cy = w / 2, h / 2
     
-    # Create Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
+    # Create meshgrid of pixel coordinates
+    y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
     
-    # Use the new depth_to_3d function for consistent conversion 
-    # This ensures Y is up in the world coordinate system
-    points_3d, valid_mask = depth_to_3d(depth_np, focallength_px.item(), w, h)
+    # Convert pixel coordinates to camera coordinates
+    Z = depth_np
+    X = (x_coords - cx) * Z / focallength_px
+    Y = (y_coords - cy) * Z / focallength_px
     
-    # Reshape the RGB image and get colors for valid points
-    colors = np.array(image).reshape(-1, 3)[valid_mask.flatten()] / 255.0
+    # Stack coordinates and reshape to Nx3 array
+    points = np.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+    
+    # Get colors from original image
+    colors = np.array(image).reshape(-1, 3) / 255.0
+    
+    # Remove points with zero depth (shadows that were removed)
+    valid_indices = Z.reshape(-1) > 0
+    points = points[valid_indices]
+    colors = colors[valid_indices]
+    
+    # Remove points that are too far away
+    far_mask = points[:, 2] < 100
+    points = points[far_mask]
+    colors = colors[far_mask]
     
     # Remove stray points if requested
-    if remove_strays and len(points_3d) > 0:
-        points_3d, colors = remove_stray_points(points_3d, colors)
+    if remove_strays and len(points) > 0:
+        points, colors = remove_stray_points(points, colors)
     
-    # Apply ground plane normalization if requested and ground model is available
-    if normalize_ground_to_zero and ground_model is not None:
-        print("Normalizing point cloud so ground plane is at y=0...")
-        points_3d = normalize_point_cloud_to_ground(points_3d, ground_model)
-        
-        # After normalization, we need to update ground_model to reflect y=0 plane
-        # The new plane equation is simply y = 0 (normal = [0,1,0], d = 0)
-        ground_model = {
-            'normal': np.array([0, 1, 0]),
-            'origin': np.array([0, 0, 0]),
-            'd': 0
-        }
-        
-        # Apply grid-based adjustment if requested
-        if grid_adjust_ground:
-            print(f"Applying grid-based ground adjustment (grid size: {grid_size}, percentile: {ground_percentile})...")
-            points_3d = grid_based_ground_adjustment(points_3d, grid_size=grid_size, percentile=ground_percentile)
-    
-    # Add points and colors to the point cloud
-    pcd.points = o3d.utility.Vector3dVector(points_3d)
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
     pcd.colors = o3d.utility.Vector3dVector(colors)
     
-    # Create a mesh from the point cloud using Poisson surface reconstruction
-    mesh = o3d.geometry.TriangleMesh()
+    # Save a copy of the point cloud for visualization
+    pcd_for_viz = copy.deepcopy(pcd)
     
-    # Add ground plane mesh if requested and ground_model is available
-    ground_mesh = None
-    if add_ground_plane and ground_model is not None:
-        # If we normalized the ground to y=0, create a simple horizontal ground plane
-        if normalize_ground_to_zero:
-            # Find extent of points
-            x_min, x_max = np.min(points_3d[:, 0]), np.max(points_3d[:, 0])
-            z_min, z_max = np.min(points_3d[:, 2]), np.max(points_3d[:, 2])
-            
-            # Add margin around points
-            margin = max(x_max - x_min, z_max - z_min) * 0.2
-            x_min -= margin
-            x_max += margin
-            z_min -= margin
-            z_max += margin
-            
-            # Create a simple horizontal ground plane mesh at y=0
-            ground_mesh = o3d.geometry.TriangleMesh()
-            ground_mesh.vertices = o3d.utility.Vector3dVector([
-                [x_min, 0, z_min],
-                [x_max, 0, z_min],
-                [x_max, 0, z_max],
-                [x_min, 0, z_max]
-            ])
-            ground_mesh.triangles = o3d.utility.Vector3iVector(
-                [[0, 1, 2], [0, 2, 3]]
-            )
-            
-            # Set a semi-transparent gray color
-            ground_color = np.array([0.8, 0.8, 0.8])
-            ground_mesh.vertex_colors = o3d.utility.Vector3dVector(
-                np.tile(ground_color, (4, 1))
-            )
-        else:
-            # Create a large ground plane mesh based on the detected ground
-            if ground_mask is not None:
-                ground_mesh = create_ground_plane_mesh(
-                    depth_np, ground_mask, ground_model, focallength_px.item(), 
-                    scale_factor=5.0, rotation_offset=rotation_offset
-                )
-            else:
-                # Create a simple ground plane mesh if no ground mask is available
-                ground_size = 20.0  # meters
-                ground_opacity = 0.5
-                
-                # Create vertices for the ground plane
-                origin = ground_model['origin']
-                normal = ground_model['normal']
-                
-                # Find two vectors perpendicular to the normal
-                if abs(normal[0]) < abs(normal[1]) and abs(normal[0]) < abs(normal[2]):
-                    v1 = np.array([0, -normal[2], normal[1]])
-                elif abs(normal[1]) < abs(normal[2]):
-                    v1 = np.array([-normal[2], 0, normal[0]])
-                else:
-                    v1 = np.array([-normal[1], normal[0], 0])
-                
-                v1 = v1 / np.linalg.norm(v1)
-                v2 = np.cross(normal, v1)
-                v2 = v2 / np.linalg.norm(v2)
-                
-                # Scale the vectors to the desired ground size
-                v1 = v1 * ground_size
-                v2 = v2 * ground_size
-                
-                # Create the 4 corners of the ground plane
-                corners = [
-                    origin - v1 - v2,
-                    origin + v1 - v2,
-                    origin + v1 + v2,
-                    origin - v1 + v2
-                ]
-                
-                # Create a mesh with 2 triangles
-                ground_mesh = o3d.geometry.TriangleMesh()
-                ground_mesh.vertices = o3d.utility.Vector3dVector(corners)
-                ground_mesh.triangles = o3d.utility.Vector3iVector(
-                    [[0, 1, 2], [0, 2, 3]]
-                )
-                
-                # Set the color to gray with some transparency
-                ground_color = np.array([0.8, 0.8, 0.8])
-                ground_mesh.vertex_colors = o3d.utility.Vector3dVector(
-                    np.tile(ground_color, (4, 1))
-                )
+    # Now create a mesh from this point cloud
+    print("Creating mesh from point cloud...")
     
+    # Downsample the point cloud for faster mesh creation
+    pcd_down = pcd.voxel_down_sample(voxel_size=0.05)
+    
+    # Estimate normals
+    pcd_down.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+    )
+    pcd_down.orient_normals_towards_camera_location()
+    
+    # Try different mesh creation methods
+    
+    # Method 1: Ball pivoting (preserves exact point positions)
+    radii = [0.05, 0.1, 0.2, 0.4]
+    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+        pcd_down, o3d.utility.DoubleVector(radii)
+    )
+    
+    # Compute vertex normals for better visualization
+    mesh.compute_vertex_normals()
+    
+    # Create ground plane mesh if requested
+    ground_plane = None
+    if add_ground_plane and ground_mask is not None and ground_model is not None:
+        ground_plane = create_ground_plane_mesh(
+            depth.detach().cpu().numpy(), 
+            ground_mask, 
+            ground_model, 
+            focallength_px.item(),
+            rotation_offset=rotation_offset
+        )
+    
+    # Save mesh if output path is provided
     if output_path:
-        # Save the point cloud as PLY
-        point_cloud_path = output_path
-        if not point_cloud_path.endswith('.ply'):
-            point_cloud_path = point_cloud_path + '.ply'
-        o3d.io.write_point_cloud(point_cloud_path, pcd)
-        print(f"Point cloud saved to {point_cloud_path}")
-        
-        # If we have a mesh, save it too
-        if mesh.vertices:
-            mesh_path = output_path
-            if not mesh_path.endswith('.obj'):
-                mesh_path = mesh_path + '.obj'
-            o3d.io.write_triangle_mesh(mesh_path, mesh)
-            print(f"Mesh saved to {mesh_path}")
+        o3d.io.write_triangle_mesh(output_path, mesh)
+        print(f"Mesh saved to {output_path}")
     
+    # Visualize mesh and point cloud together
     if visualize:
-        # Visualize the point cloud
-        vis = o3d.visualization.Visualizer()
-        vis.create_window()
-        
-        # Add the point cloud to the visualizer
-        vis.add_geometry(pcd)
-        
-        # Add ground plane if available
-        if ground_mesh:
-            vis.add_geometry(ground_mesh)
-        
-        # Set visualization options
-        opt = vis.get_render_option()
-        opt.point_size = 2.0
-        
-        # Set view control options - position camera to look at scene
-        ctrl = vis.get_view_control()
-        ctrl.set_up([0, -1, 0])  # Set Y axis as up direction in visualization
-        
-        # Show the visualization
-        vis.run()
-        vis.destroy_window()
+        vis_objects = [mesh, pcd_for_viz]
+        if ground_plane is not None and len(np.asarray(ground_plane.vertices)) > 0:
+            vis_objects.append(ground_plane)
+            
+        o3d.visualization.draw_geometries(
+            vis_objects,
+            mesh_show_back_face=True,
+            mesh_show_wireframe=False,
+            point_show_normal=False
+        )
     
-    return
+    return mesh
 
 def create_textured_mesh(image_path, output_path=None, visualize=True, remove_shadows=True,
                          interpolate_ground=True, remove_strays=True, visualize_ground=False,
                          add_ground_plane=True, use_saved_ground=True, rotation_offset=None,
                          ground_params_dir=None, force_horizontal=False, max_ground_angle=5.0,
-                         perfectly_flat_ground=False, use_smart_ground_fit=False,
-                         normalize_ground_to_zero=False, grid_adjust_ground=False,
-                         grid_size=20, ground_percentile=5):
+                         perfectly_flat_ground=False, use_smart_ground_fit=False):
     """
-    Create a textured 3D mesh from an image using depth estimation.
-    This uses surface reconstruction to create a smooth mesh with texture.
+    Convert a 2D image to a textured 3D mesh using Depth Pro.
+    Uses Poisson surface reconstruction for a more detailed mesh.
+    Uses exactly the same dimensions as the point cloud in video3D.py.
     
     Args:
         image_path: Path to the input image
@@ -2583,36 +2392,149 @@ def create_textured_mesh(image_path, output_path=None, visualize=True, remove_sh
         force_horizontal: Whether to force the ground plane to be more horizontal
         max_ground_angle: Maximum allowed angle with horizontal plane in degrees
         perfectly_flat_ground: If True, make the plane perfectly horizontal
-        use_smart_ground_fit: Whether to use the grid-based ground plane fitting
-        normalize_ground_to_zero: Whether to normalize coordinates so ground plane is at y=0
-        grid_adjust_ground: Whether to use grid-based approach to ensure points touch ground
-        grid_size: Number of grid cells in each dimension for grid adjustment
-        ground_percentile: Percentile of lowest points to consider for grid adjustment
+        use_smart_ground_fit: Whether to use the smart grid-based ground plane fitting
     
     Returns:
-        None
+        o3d.geometry.TriangleMesh: The created mesh
     """
-    # Implementation delegating to the direct method with poisson reconstruction
-    create_mesh_from_video3d_pointcloud(
-        image_path, output_path, visualize, remove_shadows, 
-        interpolate_ground, remove_strays, visualize_ground,
-        add_ground_plane, use_saved_ground, rotation_offset,
-        ground_params_dir, force_horizontal, max_ground_angle, 
-        perfectly_flat_ground, use_smart_ground_fit,
-        normalize_ground_to_zero, grid_adjust_ground,
-        grid_size, ground_percentile
+    # Load model and preprocessing transform
+    model, transform = depth_pro.create_model_and_transforms()
+    model.eval()
+
+    # Load and preprocess an image
+    image, _, f_px = depth_pro.load_rgb(image_path)
+    image_tensor = transform(image)
+
+    # Run inference
+    prediction = model.infer(image_tensor, f_px=f_px)
+    depth = prediction["depth"]  # Depth in [m]
+    focallength_px = prediction["focallength_px"]  # Focal length in pixels
+    
+    # Convert depth to numpy array - EXACTLY as in video3D.py
+    depth_np = depth.detach().cpu().numpy()
+    
+    # Remove shadow artifacts if requested
+    ground_mask = None
+    ground_model = None
+    if remove_shadows:
+        depth_np, ground_mask, ground_model = remove_depth_shadows(
+            depth_np, np.array(image), 
+            interpolate_ground=interpolate_ground,
+            image_path=image_path,
+            use_saved_ground=use_saved_ground,
+            rotation_offset=rotation_offset,
+            ground_params_dir=ground_params_dir,
+            optimize_ground=True,
+            force_horizontal=force_horizontal,
+            max_ground_angle=max_ground_angle,
+            perfectly_flat_ground=perfectly_flat_ground,
+            use_smart_ground_fit=use_smart_ground_fit
+        )
+        
+        # Visualize ground detection if requested
+        if visualize_ground and ground_mask is not None:
+            visualize_ground_detection(depth.detach().cpu().numpy(), ground_mask, np.array(image))
+    
+    # Get image dimensions
+    h, w = depth_np.shape
+    
+    # Calculate principal point (assuming center of image)
+    cx, cy = w / 2, h / 2
+    
+    # Create meshgrid of pixel coordinates - EXACTLY as in video3D.py
+    y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+    
+    # Convert pixel coordinates to camera coordinates - EXACTLY as in video3D.py
+    Z = depth_np
+    X = (x_coords - cx) * Z / focallength_px.item()
+    Y = (y_coords - cy) * Z / focallength_px.item()
+    
+    # Create point cloud directly - EXACTLY as in video3D.py
+    points = np.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+    colors = np.array(image).reshape(-1, 3) / 255.0
+    
+    # Remove points with zero depth (shadows that were removed)
+    valid_indices = Z.reshape(-1) > 0
+    points = points[valid_indices]
+    colors = colors[valid_indices]
+    
+    # Remove points that are too far away
+    far_mask = points[:, 2] < 100
+    points = points[far_mask]
+    colors = colors[far_mask]
+    
+    # Remove stray points if requested
+    if remove_strays and len(points) > 0:
+        points, colors = remove_stray_points(points, colors)
+    
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    
+    # Estimate normals for better mesh reconstruction
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
     )
+    pcd.orient_normals_towards_camera_location()
+    
+    # Create mesh from point cloud
+    print("Creating mesh from point cloud...")
+    
+    # Method 1: Poisson reconstruction
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=9, width=0, scale=1.1, linear_fit=False
+    )
+    
+    # Remove low-density vertices
+    vertices_to_remove = densities < np.quantile(densities, 0.1)
+    mesh.remove_vertices_by_mask(vertices_to_remove)
+    
+    # Transfer color from point cloud to mesh
+    mesh.paint_uniform_color([0.7, 0.7, 0.7])  # Default color
+    
+    # Compute vertex normals for better visualization
+    mesh.compute_vertex_normals()
+    
+    # Create ground plane mesh if requested
+    ground_plane = None
+    if add_ground_plane and ground_mask is not None and ground_model is not None:
+        ground_plane = create_ground_plane_mesh(
+            depth.detach().cpu().numpy(), 
+            ground_mask, 
+            ground_model, 
+            focallength_px.item(),
+            rotation_offset=rotation_offset
+        )
+    
+    # Save mesh if output path is provided
+    if output_path:
+        o3d.io.write_triangle_mesh(output_path, mesh)
+        print(f"Mesh saved to {output_path}")
+    
+    # Visualize mesh
+    if visualize:
+        vis_objects = [mesh]
+        if ground_plane is not None and len(np.asarray(ground_plane.vertices)) > 0:
+            vis_objects.append(ground_plane)
+            
+        o3d.visualization.draw_geometries(
+            vis_objects,
+            mesh_show_back_face=True,
+            mesh_show_wireframe=False,
+            point_show_normal=False
+        )
+    
+    return mesh
 
 def create_simple_mesh(image_path, output_path=None, visualize=True, remove_shadows=True,
                        interpolate_ground=True, remove_strays=True, visualize_ground=False,
                        add_ground_plane=True, use_saved_ground=True, rotation_offset=None,
                        ground_params_dir=None, force_horizontal=False, max_ground_angle=5.0,
-                       perfectly_flat_ground=False, use_smart_ground_fit=False,
-                       normalize_ground_to_zero=False, grid_adjust_ground=False,
-                       grid_size=20, ground_percentile=5):
+                       perfectly_flat_ground=False, use_smart_ground_fit=False):
     """
-    Create a simple 3D mesh from an image using depth estimation.
-    This uses basic triangulation of the point cloud without smoothing.
+    Create a simple height map mesh from a depth image.
+    Uses exactly the same dimensions as the point cloud in video3D.py.
     
     Args:
         image_path: Path to the input image
@@ -2629,333 +2551,231 @@ def create_simple_mesh(image_path, output_path=None, visualize=True, remove_shad
         force_horizontal: Whether to force the ground plane to be more horizontal
         max_ground_angle: Maximum allowed angle with horizontal plane in degrees
         perfectly_flat_ground: If True, make the plane perfectly horizontal
-        use_smart_ground_fit: Whether to use the grid-based ground plane fitting
-        normalize_ground_to_zero: Whether to normalize coordinates so ground plane is at y=0
-        grid_adjust_ground: Whether to use grid-based approach to ensure points touch ground
-        grid_size: Number of grid cells in each dimension for grid adjustment
-        ground_percentile: Percentile of lowest points to consider for grid adjustment
-    
-    Returns:
-        None
+        use_smart_ground_fit: Whether to use the smart grid-based ground plane fitting
     """
-    # Implementation delegating to the direct method with simple mesh creation
-    create_mesh_from_video3d_pointcloud(
-        image_path, output_path, visualize, remove_shadows, 
-        interpolate_ground, remove_strays, visualize_ground,
-        add_ground_plane, use_saved_ground, rotation_offset,
-        ground_params_dir, force_horizontal, max_ground_angle, 
-        perfectly_flat_ground, use_smart_ground_fit,
-        normalize_ground_to_zero, grid_adjust_ground,
-        grid_size, ground_percentile
+    # Load model and preprocessing transform
+    model, transform = depth_pro.create_model_and_transforms()
+    model.eval()
+
+    # Load and preprocess an image
+    image, _, f_px = depth_pro.load_rgb(image_path)
+    image_tensor = transform(image)
+
+    # Run inference
+    prediction = model.infer(image_tensor, f_px=f_px)
+    depth = prediction["depth"]  # Depth in [m]
+    focallength_px = prediction["focallength_px"]  # Focal length in pixels
+    
+    # Convert to numpy - EXACTLY as in video3D.py
+    depth_np = depth.detach().cpu().numpy()
+    
+    # Remove shadow artifacts if requested
+    ground_mask = None
+    ground_model = None
+    if remove_shadows:
+        depth_np, ground_mask, ground_model = remove_depth_shadows(
+            depth_np, np.array(image), 
+            interpolate_ground=interpolate_ground,
+            image_path=image_path,
+            use_saved_ground=use_saved_ground,
+            rotation_offset=rotation_offset,
+            ground_params_dir=ground_params_dir,
+            optimize_ground=True,
+            force_horizontal=force_horizontal,
+            max_ground_angle=max_ground_angle,
+            perfectly_flat_ground=perfectly_flat_ground,
+            use_smart_ground_fit=use_smart_ground_fit
+        )
+        
+        # Visualize ground detection if requested
+        if visualize_ground and ground_mask is not None:
+            visualize_ground_detection(depth.detach().cpu().numpy(), ground_mask, np.array(image))
+    
+    # Create a height map mesh
+    h, w = depth_np.shape
+    
+    # Downsample for faster processing if needed
+    scale_factor = 1
+    if max(h, w) > 1000:
+        scale_factor = 4
+    elif max(h, w) > 500:
+        scale_factor = 2
+        
+    if scale_factor > 1:
+        h_ds = h // scale_factor
+        w_ds = w // scale_factor
+        depth_np = cv2.resize(depth_np, (w_ds, h_ds))
+        image = cv2.resize(np.array(image), (w_ds, h_ds))
+        if ground_mask is not None:
+            ground_mask = cv2.resize(ground_mask.astype(np.uint8), (w_ds, h_ds)) > 0
+        h, w = h_ds, w_ds
+    
+    # Calculate principal point (assuming center of image)
+    cx, cy = w / 2, h / 2
+    
+    # Create meshgrid of pixel coordinates - EXACTLY as in video3D.py
+    y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+    
+    # Convert pixel coordinates to camera coordinates - EXACTLY as in video3D.py
+    Z = depth_np
+    X = (x_coords - cx) * Z / focallength_px.item()
+    Y = (y_coords - cy) * Z / focallength_px.item()
+    
+    # Create vertices and colors
+    vertices = []
+    colors = []
+    
+    # Create a mask for valid points (non-shadow)
+    valid_mask = Z > 0 if remove_shadows else np.ones_like(Z, dtype=bool)
+    
+    # Flatten for mesh creation
+    for i in range(h):
+        for j in range(w):
+            if valid_mask[i, j]:
+                vertices.append([X[i, j], Y[i, j], Z[i, j]])
+                colors.append(image[i, j] / 255.0)
+    
+    # If we have no valid vertices, return an empty mesh
+    if len(vertices) == 0:
+        print("No valid vertices found after shadow removal.")
+        mesh = o3d.geometry.TriangleMesh()
+        return mesh
+    
+    # Convert to numpy arrays
+    vertices = np.array(vertices)
+    colors = np.array(colors)
+    
+    # Remove stray points if requested
+    if remove_strays and len(vertices) > 0:
+        vertices, colors = remove_stray_points(vertices, colors)
+        
+        # If all points were removed as strays, return empty mesh
+        if len(vertices) == 0:
+            print("No valid vertices left after stray point removal.")
+            mesh = o3d.geometry.TriangleMesh()
+            return mesh
+    
+    # Create a point cloud for triangulation
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(vertices)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    
+    # Estimate normals
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
     )
+    pcd.orient_normals_towards_camera_location()
+    
+    # Create mesh using Alpha shapes or Ball pivoting
+    # This works better than the grid-based approach when we have removed points
+    radii = [0.05, 0.1, 0.2, 0.4]
+    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+        pcd, o3d.utility.DoubleVector(radii)
+    )
+    
+    # Compute normals
+    mesh.compute_vertex_normals()
+    
+    # Create ground plane mesh if requested
+    ground_plane = None
+    if add_ground_plane and ground_mask is not None and ground_model is not None:
+        ground_plane = create_ground_plane_mesh(
+            depth.detach().cpu().numpy(), 
+            ground_mask, 
+            ground_model, 
+            focallength_px.item(),
+            rotation_offset=rotation_offset
+        )
+    
+    # Save mesh if output path is provided
+    if output_path:
+        o3d.io.write_triangle_mesh(output_path, mesh)
+        print(f"Mesh saved to {output_path}")
+    
+    # Visualize mesh
+    if visualize:
+        vis_objects = [mesh]
+        if ground_plane is not None and len(np.asarray(ground_plane.vertices)) > 0:
+            vis_objects.append(ground_plane)
+            
+        o3d.visualization.draw_geometries(
+            vis_objects,
+            mesh_show_back_face=True,
+            mesh_show_wireframe=False,
+            point_show_normal=False
+        )
+    
+    return mesh
 
 # Add this helper function for computing 3D points from depth
-def depth_to_3d(depth_in, focallength_px, width, height):
+def depth_to_3d(x_indices, y_indices, depths, focallength_px):
     """
-    Convert a depth map to 3D points in world coordinates.
+    Convert pixel coordinates and depths to 3D points
     
     Args:
-        depth_in: The depth map
-        focallength_px: The focal length of the camera, in pixels
-        width: Width of the depth map
-        height: Height of the depth map
+        x_indices: X pixel coordinates (width)
+        y_indices: Y pixel coordinates (height)
+        depths: Depth values at those pixels
+        focallength_px: Camera focal length in pixels
         
     Returns:
-        points_3d: Nx3 array of 3D points in world coordinate system where Y points up
-        valid_mask: Boolean mask of valid depth values
-    """
-    # Convert depth map to numpy
-    depth_np = np.asarray(depth_in)
-    
-    # Create grid of pixel coordinates
-    y_indices, x_indices = np.indices((height, width))
-    
-    # Center of the image
-    cx = width / 2
-    cy = height / 2
-    
-    # Create depth values and filter invalid depths
-    valid_mask = ~np.isnan(depth_np) & (depth_np > 0)
-    z = depth_np[valid_mask].flatten()
-    
-    # Calculate the 3D coordinates
-    x = (x_indices[valid_mask] - cx) * z / focallength_px
-    # Invert Y so that it points up (positive Y is up in world coordinates)
-    y = -1 * (y_indices[valid_mask] - cy) * z / focallength_px
-    
-    # Stack the coordinates into a 3D point cloud
-    points_3d = np.column_stack((x, y, z))
-    return points_3d, valid_mask
-
-def point_plane_distances(normal, d, points):
-    """
-    Calculate signed distances from points to a plane.
-    Positive distances indicate points above the plane, negative below.
-    
-    Args:
-        normal: Normal vector of the plane [a, b, c]
-        d: Distance parameter of the plane equation ax + by + cz + d = 0
-        points: Nx3 array of 3D points
-        
-    Returns:
-        distances: Array of signed distances from each point to the plane
-    """
-    # Ensure normal is normalized
-    normal = np.asarray(normal)
-    normal = normal / np.linalg.norm(normal)
-    
-    # Calculate signed distances using the plane equation: ax + by + cz + d = 0
-    # For each point (x, y, z), the signed distance is: (ax + by + cz + d) / sqrt(a² + b² + c²)
-    # Since the normal is normalized, we can simplify to: ax + by + cz + d
-    return np.dot(points, normal) + d
-
-def normalize_point_cloud_to_ground(points_3d, ground_model):
-    """
-    Normalizes the point cloud coordinates so the ground plane is at exactly y = 0.
-    Resets any points that fall below y = 0 to y = 0.
-    
-    Args:
         points_3d: Nx3 array of 3D points
-        ground_model: Dictionary containing ground plane parameters
-        
-    Returns:
-        normalized_points: Nx3 array of normalized 3D points with ground at y = 0
     """
-    # Ensure points_3d is a numpy array
-    points_3d = np.asarray(points_3d)
+    # Assuming the image center is at the center of the coordinates
+    cx = np.median(x_indices)
+    cy = np.median(y_indices)
     
-    # Reconstruct the implicit plane equation: ax + by + cz + d = 0
-    # where [a, b, c] is the normal vector
-    normal = ground_model['normal']
-    d = ground_model['d']
+    # Calculate 3D coordinates
+    z = depths
+    x = (x_indices - cx) * z / focallength_px
+    y = (y_indices - cy) * z / focallength_px
     
-    # Calculate signed distances from all points to the plane
-    # Positive values are above the plane, negative below
-    distances = point_plane_distances(normal, d, points_3d)
-    
-    # To normalize, we need to transform the coordinates so the plane becomes y = 0
-    # First, we need to find the transformation that aligns the plane normal with [0, 1, 0]
-    # (the y-axis normal, since y points up in our world coordinate system)
-    
-    # Create a rotation matrix that would rotate the ground normal to [0, 1, 0]
-    from_vec = normal
-    to_vec = np.array([0, 1, 0])
-    
-    # If the normal is already close to [0, 1, 0], skip rotation
-    if np.abs(np.dot(from_vec, to_vec)) > 0.99:
-        # Just use a translation
-        normalized_points = points_3d.copy()
-    else:
-        # Calculate rotation matrix using the formula for rotation between two vectors
-        from_vec = from_vec / np.linalg.norm(from_vec)
-        
-        # Cross product to get rotation axis
-        axis = np.cross(from_vec, to_vec)
-        axis = axis / np.linalg.norm(axis)
-        
-        # Dot product to get angle
-        angle = np.arccos(np.clip(np.dot(from_vec, to_vec), -1.0, 1.0))
-        
-        # Create the rotation matrix using Rodrigues' rotation formula
-        K = np.array([
-            [0, -axis[2], axis[1]],
-            [axis[2], 0, -axis[0]],
-            [-axis[1], axis[0], 0]
-        ])
-        
-        R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
-        
-        # Apply rotation to all points
-        normalized_points = (R @ points_3d.T).T
-        
-        # Update the distances based on the rotated points
-        # In the rotated space, the plane equation becomes y = constant
-        # Calculate this constant based on the rotated plane
-        rotated_normal = R @ normal
-        const = -d / rotated_normal[1]  # Using y component
-        
-        # Calculate adjusted heights (y coordinates)
-        normalized_points[:, 1] = normalized_points[:, 1] - const
-    
-    # Now, any points with y < 0 should be reset to y = 0
-    below_ground_mask = normalized_points[:, 1] < 0
-    normalized_points[below_ground_mask, 1] = 0.0
-    
-    print(f"Normalized point cloud: {len(points_3d)} points")
-    print(f"Points adjusted to y=0: {np.sum(below_ground_mask)}")
-    
-    return normalized_points
-
-def grid_based_ground_adjustment(points_3d, grid_size=20, percentile=5):
-    """
-    Implements a grid-based approach to ensure points properly touch the ground plane at y = 0.
-    For each grid cell (in the XZ plane):
-    1. Find the lowest 5% of points
-    2. Measure how high these points are above y = 0
-    3. Lower all points in that cell by that height
-    4. Ensure no points fall below y = 0
-    
-    Args:
-        points_3d: Nx3 array of 3D points with ground already normalized to y = 0
-        grid_size: Number of grid cells in each dimension (X and Z)
-        percentile: The percentile of lowest points to consider (e.g., 5 for lowest 5%)
-        
-    Returns:
-        adjusted_points: Nx3 array of adjusted 3D points
-    """
-    points = np.asarray(points_3d)
-    adjusted_points = points.copy()
-    
-    # Extract X, Y, Z coordinates
-    x_coords = points[:, 0]
-    y_coords = points[:, 1]  # Y is already normalized to have ground at y = 0
-    z_coords = points[:, 2]
-    
-    # Determine bounds for X and Z to create the grid
-    x_min, x_max = np.min(x_coords), np.max(x_coords)
-    z_min, z_max = np.min(z_coords), np.max(z_coords)
-    
-    # Create the grid
-    x_edges = np.linspace(x_min, x_max, grid_size + 1)
-    z_edges = np.linspace(z_min, z_max, grid_size + 1)
-    
-    # Initialize a counter for adjusted points
-    total_adjusted = 0
-    cells_with_points = 0
-    cells_adjusted = 0
-    
-    # Visualize grid and adjustments (for debugging)
-    if grid_size <= 30:  # Only visualize for reasonable grid sizes
-        plt.figure(figsize=(12, 10))
-        plt.scatter(x_coords, z_coords, c=y_coords, s=1, alpha=0.5, cmap='viridis')
-        plt.colorbar(label='Height (y)')
-        plt.xlabel('X')
-        plt.ylabel('Z')
-        plt.title('Points colored by height before adjustment')
-        
-        # Draw grid lines
-        for x in x_edges:
-            plt.axvline(x=x, color='r', linestyle='-', alpha=0.3)
-        for z in z_edges:
-            plt.axhline(y=z, color='r', linestyle='-', alpha=0.3)
-        
-        plt.savefig('grid_before_adjustment.png')
-        plt.close()
-    
-    # Process each grid cell
-    for i in range(grid_size):
-        for j in range(grid_size):
-            # Define cell boundaries
-            x_min_cell, x_max_cell = x_edges[i], x_edges[i+1]
-            z_min_cell, z_max_cell = z_edges[j], z_edges[j+1]
-            
-            # Find points in this cell
-            cell_mask = (x_coords >= x_min_cell) & (x_coords < x_max_cell) & \
-                       (z_coords >= z_min_cell) & (z_coords < z_max_cell)
-            
-            cell_points_indices = np.where(cell_mask)[0]
-            
-            # Skip if cell has too few points (less than 10)
-            if len(cell_points_indices) < 10:
-                continue
-            
-            cells_with_points += 1
-            
-            # Get y-coordinates of points in this cell
-            cell_y = y_coords[cell_points_indices]
-            
-            # Find the y-height at the given percentile (e.g., the 5th percentile)
-            y_percentile = np.percentile(cell_y, percentile)
-            
-            # If the lowest points are significantly above y=0, adjust the cell
-            # Only adjust if the gap is more than 0.01 units (to avoid numerical issues)
-            if y_percentile > 0.01:
-                # Calculate adjustment (shift everything down by y_percentile)
-                cells_adjusted += 1
-                
-                # Apply the adjustment to all points in this cell
-                adjusted_points[cell_points_indices, 1] -= y_percentile
-                
-                # Ensure no points go below y=0
-                below_ground = adjusted_points[cell_points_indices, 1] < 0
-                adjusted_points[cell_points_indices[below_ground], 1] = 0
-                
-                # Count adjusted points
-                total_adjusted += len(cell_points_indices)
-    
-    print(f"Grid adjustment summary:")
-    print(f"  - Grid size: {grid_size}x{grid_size}")
-    print(f"  - Cells with sufficient points: {cells_with_points}/{grid_size*grid_size}")
-    print(f"  - Cells requiring adjustment: {cells_adjusted}")
-    print(f"  - Total points adjusted: {total_adjusted}")
-    
-    # Visualize after adjustment (for debugging)
-    if grid_size <= 30:  # Only visualize for reasonable grid sizes
-        plt.figure(figsize=(12, 10))
-        plt.scatter(adjusted_points[:, 0], adjusted_points[:, 2], c=adjusted_points[:, 1], 
-                   s=1, alpha=0.5, cmap='viridis')
-        plt.colorbar(label='Height (y)')
-        plt.xlabel('X')
-        plt.ylabel('Z')
-        plt.title('Points colored by height after adjustment')
-        
-        # Draw grid lines
-        for x in x_edges:
-            plt.axvline(x=x, color='r', linestyle='-', alpha=0.3)
-        for z in z_edges:
-            plt.axhline(y=z, color='r', linestyle='-', alpha=0.3)
-        
-        plt.savefig('grid_after_adjustment.png')
-        plt.close()
-    
-    return adjusted_points
+    # Stack to create points_3d
+    points_3d = np.column_stack((x, y, z))
+    return points_3d
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Create a 3D mesh from a depth map")
-    
-    # Input/output arguments
-    parser.add_argument("--image_path", type=str, required=True,
-                        help="Path to the input image")
-    parser.add_argument("--output_path", type=str, default=None,
-                        help="Path to save the output mesh")
-    
-    # Processing options
-    parser.add_argument("--method", type=str, default="direct", choices=["direct", "poisson", "simple"],
-                        help="Mesh creation method (direct, poisson, simple)")
-    parser.add_argument("--no_visualize", action="store_false", dest="visualize",
-                        help="Don't visualize the mesh")
-    parser.add_argument("--no_remove_shadows", action="store_false", dest="remove_shadows",
-                        help="Don't remove shadow artifacts")
-    parser.add_argument("--no_interpolate_ground", action="store_false", dest="interpolate_ground",
-                        help="Don't interpolate ground plane in shadow areas")
-    parser.add_argument("--no_remove_strays", action="store_false", dest="remove_strays",
-                        help="Don't remove stray points")
+    parser = argparse.ArgumentParser(description="Convert 2D image to 3D mesh")
+    parser.add_argument("--image_path", type=str, required=True, help="Path to input image")
+    parser.add_argument("--output_path", type=str, help="Path to save mesh (optional)")
+    parser.add_argument("--method", type=str, default="direct", 
+                        choices=["direct", "poisson", "simple"], 
+                        help="Mesh creation method: 'direct' (from point cloud), 'poisson', or 'simple'")
+    parser.add_argument("--no_visualize", action="store_false", dest="visualize", 
+                        help="Disable visualization")
+    parser.add_argument("--keep_shadows", action="store_false", dest="remove_shadows",
+                        help="Keep shadow artifacts (don't remove them)")
+    parser.add_argument("--no_ground_interp", action="store_false", dest="interpolate_ground",
+                        help="Don't interpolate ground in shadow areas")
+    parser.add_argument("--keep_strays", action="store_false", dest="remove_strays",
+                        help="Keep stray points (don't remove them)")
     parser.add_argument("--visualize_ground", action="store_true",
-                        help="Visualize ground detection")
-    parser.add_argument("--no_add_ground_plane", action="store_false", dest="add_ground_plane",
-                        help="Don't add a transparent ground plane to the visualization")
+                        help="Visualize ground plane detection")
+    parser.add_argument("--no_ground_plane", action="store_false", dest="add_ground_plane",
+                        help="Don't add transparent ground plane to visualization")
+    parser.add_argument("--shadow_threshold", type=float, default=0.2,
+                        help="Threshold for shadow detection (0.1-0.5)")
     parser.add_argument("--no_saved_ground", action="store_false", dest="use_saved_ground",
-                        help="Don't use saved ground plane parameters")
+                        help="Don't use saved ground plane parameters (always detect)")
     
-    # Rotation options
+    # Use separate arguments for each rotation axis
     parser.add_argument("--rot_x", type=float, default=0.0,
-                        help="Rotation angle around X axis (degrees)")
+                        help="Rotation around X axis in degrees (can be negative)")
     parser.add_argument("--rot_y", type=float, default=0.0,
-                        help="Rotation angle around Y axis (degrees)")
+                        help="Rotation around Y axis in degrees (can be negative)")
     parser.add_argument("--rot_z", type=float, default=0.0,
-                        help="Rotation angle around Z axis (degrees)")
+                        help="Rotation around Z axis in degrees (can be negative)")
     
-    # Ground plane parameters directory
-    parser.add_argument("--ground_params_dir", type=str, default=None,
-                        help="Directory to save/load ground plane parameters")
+    parser.add_argument("--ground_params_dir", type=str,
+                        help="Directory to save/load ground plane parameters (defaults to image directory)")
     
-    # Floor plan options
+    # Add floor plan arguments
     parser.add_argument("--create_floor_plan", action="store_true",
-                        help="Create a floor plan from the depth map")
+                        help="Create a 2D floor plan by projecting objects onto the ground plane")
     parser.add_argument("--floor_plan_path", type=str, default="floor_plan.png",
-                        help="Path to save the floor plan")
+                        help="Path to save the floor plan image")
     parser.add_argument("--height_threshold", type=float, default=0.5,
                         help="Height threshold in meters above ground plane (objects above this will be included in floor plan)")
     parser.add_argument("--simplified_floor_plan", action="store_true",
@@ -2981,17 +2801,7 @@ if __name__ == "__main__":
     
     # Add argument for smart ground plane fitting
     parser.add_argument("--legacy_ground", action="store_false", dest="use_smart_ground_fit",
-                        help="Use legacy ground plane detection instead of Z-binning approach")
-    
-    # Add arguments for ground normalization and grid-based adjustment
-    parser.add_argument("--normalize_ground", action="store_true", dest="normalize_ground_to_zero",
-                        help="Normalize coordinates so ground plane is exactly at y=0")
-    parser.add_argument("--grid_adjust", action="store_true", dest="grid_adjust_ground",
-                        help="Use grid-based approach to ensure points touch the ground properly")
-    parser.add_argument("--grid_size", type=int, default=20,
-                        help="Number of grid cells in each dimension for grid adjustment (default: 20)")
-    parser.add_argument("--ground_percentile", type=int, default=5,
-                        help="Percentile of lowest points to consider for ground adjustment (default: 5)")
+                        help="Use legacy ground plane detection instead of grid-based approach")
     
     args = parser.parse_args()
     
@@ -3020,12 +2830,6 @@ if __name__ == "__main__":
     # Convert depth to numpy array
     depth_np = depth.detach().cpu().numpy()
     
-    # Print message about ground plane approach
-    if args.use_smart_ground_fit:
-        print("Using improved Z-binning ground plane detection (default)")
-    else:
-        print("Using legacy ground plane detection (--legacy_ground flag enabled)")
-    
     # Remove shadow artifacts if requested
     ground_mask = None
     ground_model = None
@@ -3041,8 +2845,7 @@ if __name__ == "__main__":
             force_horizontal=args.force_horizontal,
             max_ground_angle=args.max_ground_angle,
             perfectly_flat_ground=args.perfectly_flat_ground,
-            use_smart_ground_fit=args.use_smart_ground_fit,
-            visualize_ground=args.visualize_ground
+            use_smart_ground_fit=args.use_smart_ground_fit
         )
     
     # Create floor plan if requested
@@ -3077,8 +2880,7 @@ if __name__ == "__main__":
             args.remove_shadows, args.interpolate_ground, args.remove_strays, 
             args.visualize_ground, args.add_ground_plane, args.use_saved_ground, rotation_offset,
             args.ground_params_dir, args.force_horizontal, args.max_ground_angle, args.perfectly_flat_ground,
-            args.use_smart_ground_fit, args.normalize_ground_to_zero, args.grid_adjust_ground, 
-            args.grid_size, args.ground_percentile
+            args.use_smart_ground_fit
         )
     elif args.method == "poisson":
         create_textured_mesh(
@@ -3086,8 +2888,7 @@ if __name__ == "__main__":
             args.remove_shadows, args.interpolate_ground, args.remove_strays, 
             args.visualize_ground, args.add_ground_plane, args.use_saved_ground, rotation_offset,
             args.ground_params_dir, args.force_horizontal, args.max_ground_angle, args.perfectly_flat_ground,
-            args.use_smart_ground_fit, args.normalize_ground_to_zero, args.grid_adjust_ground, 
-            args.grid_size, args.ground_percentile
+            args.use_smart_ground_fit
         )
     else:
         create_simple_mesh(
@@ -3095,6 +2896,5 @@ if __name__ == "__main__":
             args.remove_shadows, args.interpolate_ground, args.remove_strays, 
             args.visualize_ground, args.add_ground_plane, args.use_saved_ground, rotation_offset,
             args.ground_params_dir, args.force_horizontal, args.max_ground_angle, args.perfectly_flat_ground,
-            args.use_smart_ground_fit, args.normalize_ground_to_zero, args.grid_adjust_ground, 
-            args.grid_size, args.ground_percentile
+            args.use_smart_ground_fit
         ) 

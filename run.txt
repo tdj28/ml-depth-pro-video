@@ -3,7 +3,19 @@ python video3D.py --image_path TEMP/FRAMES/output_0243.png
 python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --shadow_threshold 0.15 
 
 
-python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --ground_params_dir ./TEMP
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --ground_params_dir ./TEMP 
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP -force_horizontal --perfectly_flat
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP --visualize_ground
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP
+
+
+
+python mesh_from_depth.py --image_path TEMP/FRAMES/output_0243.png --method direct --no_saved_ground --ground_params_dir ./TEMP --normalize_ground  --grid_adjust
+
+ml-depth-pro-video % python create_floor_plan.py --image_path TEMP/FRAMES/output_0243.png --simplified --color_by_height
 
 #########################################################################################
 
