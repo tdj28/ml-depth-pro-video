@@ -246,15 +246,14 @@ def save_ground_plane_params(ground_model, image_path, output_dir=None):
     }
     
     # Generate output filename based on input image
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
     if output_dir is None:
         output_dir = os.path.dirname(image_path)
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Create output path
-    json_path = os.path.join(output_dir, f"{base_name}_ground_plane.json")
+    # Create output path - default to ground.json
+    json_path = os.path.join(output_dir, "ground.json")
     
     # Save to JSON file
     with open(json_path, 'w') as f:
@@ -274,13 +273,19 @@ def load_ground_plane_params(image_path, input_dir=None):
     Returns:
         ground_model: Dictionary containing ground plane parameters, or None if file not found
     """
-    # Generate input filename based on input image
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
+    # Set input directory to image directory if not specified
     if input_dir is None:
         input_dir = os.path.dirname(image_path)
     
-    # Create input path
-    json_path = os.path.join(input_dir, f"{base_name}_ground_plane.json")
+    # Try to load from default ground.json first
+    json_path = os.path.join(input_dir, "ground.json")
+    
+    # If the default file doesn't exist, try the legacy naming format
+    if not os.path.exists(json_path):
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        legacy_json_path = os.path.join(input_dir, f"{base_name}_ground_plane.json")
+        if os.path.exists(legacy_json_path):
+            json_path = legacy_json_path
     
     # Check if file exists
     if not os.path.exists(json_path):
@@ -840,7 +845,9 @@ def depth_to_3d(depth_in, focallength_px, width, height):
     z = depth_np[valid_mask].flatten()
     
     # Calculate the 3D coordinates
-    x = (x_indices[valid_mask] - cx) * z / focallength_px
+    # Negate x to preserve the correct left-right orientation from the original image
+    # Without negation, left becomes right and vice versa in the point cloud
+    x = -1 * (x_indices[valid_mask] - cx) * z / focallength_px
     # Invert Y so that it points up (positive Y is up in world coordinates)
     y = -1 * (y_indices[valid_mask] - cy) * z / focallength_px
     
@@ -1115,7 +1122,7 @@ def create_normalized_pointcloud(image_path, output_path,
                                 grid_size=20, ground_percentile=5,
                                 downscale_factor=1.0, half_precision=False,
                                 render_png=False, render_width=1280, render_height=720,
-                                view_preset="front", multi_view=False):
+                                view_preset="front", multi_view=False, return_pointcloud=False):
     """
     Create a normalized point cloud from an image:
     1. Detect the ground plane
@@ -1137,9 +1144,11 @@ def create_normalized_pointcloud(image_path, output_path,
         render_height: Height of the rendered PNG image in pixels (default: 720)
         view_preset: Camera angle preset for rendering (default: "front")
         multi_view: Whether to render multiple views of the point cloud in a grid (default: False)
+        return_pointcloud: Whether to return the point cloud object (default: False)
     
     Returns:
-        None - Saves the point cloud to output_path or renders it to a PNG
+        If return_pointcloud is True: tuple (pcd, colors) where pcd is the Open3D point cloud and colors are the point colors
+        Otherwise: None - Saves the point cloud to output_path or renders it to a PNG
     """
     try:
         # Get the optimal device for the system
@@ -1220,6 +1229,9 @@ def create_normalized_pointcloud(image_path, output_path,
         ground_model = None
         if ground_params_dir is not None:
             ground_model = load_ground_plane_params(image_path, ground_params_dir)
+        else:
+            # Default to looking in the same directory as the image
+            ground_model = load_ground_plane_params(image_path)
         
         # If no saved ground parameters, detect the ground plane
         if ground_model is None:
@@ -1258,9 +1270,13 @@ def create_normalized_pointcloud(image_path, output_path,
         if rotation_offset is not None and ground_model is not None:
             ground_model = apply_rotation_to_plane(ground_model, rotation_offset)
         
-        # Save ground model if directory is specified
-        if ground_model is not None and ground_params_dir is not None:
-            save_ground_plane_params(ground_model, image_path, ground_params_dir)
+        # Save ground model to default location (ground.json in the image directory) if not specified
+        if ground_model is not None:
+            if ground_params_dir is not None:
+                save_ground_plane_params(ground_model, image_path, ground_params_dir)
+            else:
+                # Default to saving in the same directory as the image
+                save_ground_plane_params(ground_model, image_path)
         
         # Normalize the point cloud (ground plane at y=0)
         print("Normalizing point cloud so ground plane is at y=0...")
@@ -1274,6 +1290,11 @@ def create_normalized_pointcloud(image_path, output_path,
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points_3d)
         pcd.colors = o3d.utility.Vector3dVector(colors)
+        
+        # If requested to return the point cloud, do so
+        if return_pointcloud:
+            print("Returning point cloud without saving to disk")
+            return pcd, colors
         
         # Either render to PNG or save as PLY
         if render_png:
@@ -1301,8 +1322,11 @@ def create_normalized_pointcloud(image_path, output_path,
         print(f"Error processing image: {str(e)}")
         import traceback
         traceback.print_exc()
+        
+        if return_pointcloud:
+            return None, None
     
-    return
+    return None if return_pointcloud else output_path
 
 if __name__ == "__main__":
     import argparse
@@ -1317,7 +1341,7 @@ if __name__ == "__main__":
     
     # Ground plane parameters directory
     parser.add_argument("--ground_params_dir", type=str, default=None,
-                        help="Directory to save/load ground plane parameters")
+                        help="Directory to save/load ground plane parameters (defaults to image directory and uses 'ground.json')")
     
     # Rotation offset arguments
     parser.add_argument("--rot_x", type=float, default=0.0,

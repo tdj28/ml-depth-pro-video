@@ -12,3 +12,35 @@ python img_to_normalized_pointcloud.py --image_path TEMP/FRAMES/output_0243.png 
 
 
 python img_to_normalized_pointcloud.py --image_path input.jpg --render_png --view_preset isometric --render_width 1920 --render_height 1080
+
+python img_to_normalized_pointcloud.py --image_path TEMP/FRAMES/output_0243.png --grid_size 100 --ground_percentile 1 --optimized --downscale_factor 0.5 --num_threads 6 --render_png --render_width 1920 --render_height 1080 --multi_view
+
+python demo_pointcloud_to_mesh.py --image_path TEMP/FRAMES/output_0243.png
+
+python pointcloud_to_mesh.py --image_path TEMP/FRAMES/output_0243.png --voxel_size 0.05 --depth 7 --downscale_factor 1.0
+
+
+python pointcloud_to_mesh.py --image_path TEMP/FRAMES/output_0243.png --voxel_size 0.02 --mesh_method ball_pivoting
+
+
+python demo_early_depth_scaling.py --image_path TEMP/FRAMES/output_0243.png --high_quality --depth_scale 0.7
+
+python img_to_normalized_pointcloud.py --image_path TEMP/FRAMES/output_0243.png --depth_scale 0.7
+
+
+python pointcloud_cleaner.py --image_path TEMP/FRAMES/output_0243.png --z_scale_factor 0.5
+
+
+python cleaned_pointcloud_to_floorplan.py --pointcloud_path output_0243_clean.ply
+
+python cleaned_pointcloud_to_floorplan.py --pointcloud_path ./output_0243_clean.ply --min_height 0.2 --max_height 1.8
+
+python cleaned_pointcloud_to_floorplan.py --pointcloud_path ./output_0243_clean.ply --density_threshold 2
+
+
+python cleaned_pointcloud_to_floorplan.py --pointcloud_path output_0243_clean.ply --height_threshold 1.0
+
+
+python simple_pointcloud_viewer.py --pointcloud_path output_0243_clean.ply --height_threshold 1.0 --point_size 5
+
+python simple_pointcloud_viewer.py --pointcloud_path output_0243_clean.ply --height_threshold 1.3 --point_size 5
