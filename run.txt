@@ -48,4 +48,4 @@ python simple_pointcloud_viewer.py --pointcloud_path output_0243_clean.ply --hei
 
 python pointcloud_pipeline.py --frames_dir ./TEMP/FRAMES --output_dir ./test_output --start_frame 243 --end_frame 243 --height_threshold 1.3 --point_size 10 --half_precision
 
-python pointcloud_pipeline.py --frames_dir ./TEMP/FRAMES --output_dir ./test_regular --start_frame 0 --end_frame 493 --height_threshold 1.3 --point_size 10 --half_precision --num_workers 2
+python pointcloud_pipeline.py --frames_dir ./TEMP/FRAMES --output_dir ./test_regular --start_frame 0 --end_frame 493 --height_threshold 1.3 --point_size 10 --half_precision --simple_output --output_main_only --num_workers 2
