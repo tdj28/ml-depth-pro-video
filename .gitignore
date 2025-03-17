@@ -211,3 +211,4 @@ mlruns/.DS_Store
 *.ply.gz.part.2
 
 *.png
+test_*
