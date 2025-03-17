@@ -50,7 +50,7 @@ def in_memory_pointcloud_visualization(pcd, output_path, height_threshold=None,
                                      point_size=2, dpi=300, max_points=50000,
                                      tight_crop=True, fit_shapes=False, cluster_eps=0.2, 
                                      min_cluster_size=5, circularity_threshold=0.85,
-                                     output_all_files=True):
+                                     output_all_files=True, x_limits=None, z_limits=None):
     """
     A version of simple_pointcloud_visualization that works with in-memory pointcloud objects
     
@@ -67,6 +67,8 @@ def in_memory_pointcloud_visualization(pcd, output_path, height_threshold=None,
         min_cluster_size: Minimum points for a valid cluster
         circularity_threshold: Threshold for circularity (0-1)
         output_all_files: Whether to output additional files (shapes, floor plan)
+        x_limits: Tuple of (min, max) limits for X axis, overrides tight_crop for X axis
+        z_limits: Tuple of (min, max) limits for Z axis, overrides tight_crop for Z axis
     
     Returns:
         True if successful, False otherwise
@@ -227,28 +229,23 @@ def in_memory_pointcloud_visualization(pcd, output_path, height_threshold=None,
                    color=circle_colors[color_idx], fontsize=10, fontweight='bold',
                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
     
-    # Set title and labels
-    plt.title(title)
-    plt.xlabel('X (meters)')
-    plt.ylabel('Z (meters)')
-    
-    # Set equal aspect ratio and grid
-    plt.axis('equal')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    
-    # Add a border to make the points stand out
+    # Clean minimalist style - no title, labels, or grid
+    plt.axis('equal')  # Keep equal aspect ratio
+    plt.axis('off')    # Turn off axis
     plt.gca().set_facecolor('#f0f0f0')  # Light gray background
     
-    # Set tight crop around visible points if requested
-    if tight_crop:
-        # Add a small padding (10% of range)
-        padding_x = 0.1 * (np.max(x) - np.min(x))
-        padding_z = 0.1 * (np.max(z) - np.min(z))
-        plt.xlim(np.min(x) - padding_x, np.max(x) + padding_x)
-        plt.ylim(np.min(z) - padding_z, np.max(z) + padding_z)
+    # Set axis limits exactly to data bounds without any padding
+    # Calculate data bounds
+    x_data_min, x_data_max = np.min(x), np.max(x)
+    z_data_min, z_data_max = np.min(z), np.max(z)
     
-    # Save the image
-    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    # Always use exact data bounds - do not use fixed limits
+    # This ensures consistent visualization by using only the actual data extents
+    plt.xlim(x_data_min, x_data_max)
+    plt.ylim(z_data_min, z_data_max)
+    
+    # Save the image with consistent layout settings
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
     
     # Export shape data to JSON if requested and shapes were fitted
     if fit_shapes and output_all_files:
@@ -277,7 +274,9 @@ def process_single_frame(
     fit_shapes=True,
     visualize_3d=False,
     simple_output=False,
-    output_all_files=True
+    output_all_files=True,
+    x_limits=None,
+    z_limits=None
 ):
     """
     Process a single frame from image to floor plan
@@ -295,6 +294,8 @@ def process_single_frame(
         visualize_3d: Create 3D point cloud visualizations
         simple_output: Output simple visualization without shapes or labels
         output_all_files: Whether to output additional files (shapes, floor plan)
+        x_limits: Tuple of (min, max) limits for X axis
+        z_limits: Tuple of (min, max) limits for Z axis
         
     Returns:
         success: True if processing was successful, False otherwise
@@ -355,12 +356,14 @@ def process_single_frame(
             point_size=point_size,
             dpi=300,
             max_points=50000,
-            tight_crop=True,
-            fit_shapes=False if simple_output else fit_shapes,
+            tight_crop=not simple_output,
+            fit_shapes=not simple_output and fit_shapes,
             cluster_eps=0.2,
             min_cluster_size=5,
             circularity_threshold=0.85,
-            output_all_files=output_all_files
+            output_all_files=output_all_files,
+            x_limits=x_limits,
+            z_limits=z_limits
         )
         
         # Clean up memory
@@ -440,7 +443,9 @@ def worker_process(task_queue, result_queue, ground_params_dir, args):
                 fit_shapes=args.fit_shapes,
                 visualize_3d=args.visualize_3d,
                 simple_output=args.simple_output,
-                output_all_files=args.output_all_files
+                output_all_files=args.output_all_files,
+                x_limits=args.x_limits,
+                z_limits=args.z_limits
             )
             
             # Send result back
@@ -481,10 +486,12 @@ def process_images_to_floor_plans(
     simple_output=False,
     output_all_files=True,
     resume=False,
-    force_reprocess=False
+    force_reprocess=False,
+    x_limits=None,
+    z_limits=None
 ):
     """
-    Process a directory of image frames into floor plans using the most efficient pipeline
+    Process a sequence of images into floor plans
     
     Args:
         frames_dir: Directory containing image frames
@@ -496,13 +503,15 @@ def process_images_to_floor_plans(
         start_frame: First frame to process (number in filename)
         end_frame: Last frame to process (number in filename)
         pattern: Pattern to match image files
-        fit_shapes: Fit rectangular and circular shapes to the point cloud
-        visualize_3d: Whether to create 3D point cloud visualizations
-        num_workers: Number of parallel workers (0 for sequential processing)
+        fit_shapes: Fit shapes to the point cloud
+        visualize_3d: Create 3D point cloud visualizations
+        num_workers: Number of parallel worker processes (0 for sequential)
         simple_output: Output simple visualization without shapes or labels
         output_all_files: Whether to output additional files (shapes, floor plan)
-        resume: Whether to resume from previous run (skipping completed frames)
-        force_reprocess: Force reprocessing of all frames even if previously completed
+        resume: Resume processing, skipping frames that were already completed
+        force_reprocess: Force reprocessing of all frames, even if previously completed
+        x_limits: Tuple of (min, max) for X axis limits
+        z_limits: Tuple of (min, max) for Z axis limits
     """
     global stop_processing
     stop_processing = False
@@ -638,7 +647,9 @@ def process_images_to_floor_plans(
                     fit_shapes=fit_shapes,
                     visualize_3d=visualize_3d,
                     simple_output=simple_output,
-                    output_all_files=output_all_files
+                    output_all_files=output_all_files,
+                    x_limits=x_limits,
+                    z_limits=z_limits
                 ))
             )
             p.daemon = True
@@ -726,7 +737,9 @@ def process_images_to_floor_plans(
                 fit_shapes=fit_shapes,
                 visualize_3d=visualize_3d,
                 simple_output=simple_output,
-                output_all_files=output_all_files
+                output_all_files=output_all_files,
+                x_limits=x_limits,
+                z_limits=z_limits
             )
             
             # Update progress tracking file
@@ -784,6 +797,16 @@ if __name__ == "__main__":
     parser.add_argument("--visualize_3d", action="store_true",
                        help="Create 3D point cloud visualizations")
     
+    # Graph limits arguments
+    parser.add_argument("--x_min", type=float, default=None,
+                       help="Minimum value for X axis")
+    parser.add_argument("--x_max", type=float, default=None,
+                       help="Maximum value for X axis")
+    parser.add_argument("--z_min", type=float, default=None,
+                       help="Minimum value for Z axis")
+    parser.add_argument("--z_max", type=float, default=None,
+                       help="Maximum value for Z axis")
+    
     # Output options
     parser.add_argument("--simple_output", action="store_true", 
                        help="Output simple visualization without shapes or labels")
@@ -807,6 +830,14 @@ if __name__ == "__main__":
                        help="Force reprocessing of all frames, even if previously completed")
     
     args = parser.parse_args()
+    
+    # Construct x_limits and z_limits tuples from individual min/max arguments
+    x_limits = None
+    z_limits = None
+    if args.x_min is not None and args.x_max is not None:
+        x_limits = (args.x_min, args.x_max)
+    if args.z_min is not None and args.z_max is not None:
+        z_limits = (args.z_min, args.z_max)
     
     # Set number of threads for numpy and OpenMP if specified
     if args.num_threads is not None:
@@ -841,13 +872,15 @@ if __name__ == "__main__":
             start_frame=args.start_frame,
             end_frame=args.end_frame,
             pattern=args.pattern,
-            fit_shapes=False if args.simple_output else args.fit_shapes,
+            fit_shapes=args.fit_shapes,
             visualize_3d=args.visualize_3d,
             num_workers=args.num_workers,
             simple_output=args.simple_output,
             output_all_files=not args.output_main_only,
             resume=args.resume,
-            force_reprocess=args.force_reprocess
+            force_reprocess=args.force_reprocess,
+            x_limits=x_limits,
+            z_limits=z_limits
         )
     except KeyboardInterrupt:
         print("\nProcessing interrupted by user.")
