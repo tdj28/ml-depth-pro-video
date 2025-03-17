@@ -248,184 +248,21 @@ def in_memory_pointcloud_visualization(pcd, output_path, height_threshold=None,
         plt.ylim(np.min(z) - padding_z, np.max(z) + padding_z)
     
     # Save the image
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=dpi)
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    
+    # Export shape data to JSON if requested and shapes were fitted
+    if fit_shapes and output_all_files:
+        shapes_path = os.path.splitext(output_path)[0] + "_shapes.json"
+        export_shape_data(shapes_path, rectangles, circles)
+    
+    # Close the figure to prevent memory leaks
     plt.close()
     
-    # Save additional files only if requested
-    if fit_shapes and output_all_files:
-        # Create a clean floor plan with just the shapes
-        shape_output_path = os.path.splitext(output_path)[0] + "_shapes.png"
-        plt.figure(figsize=(12, 12))
-        ax = plt.gca()
-        
-        # Use a nice color palette for different shapes
-        rectangle_colors = ['#4285F4', '#34A853', '#FBBC05', '#EA4335', 
-                           '#8E44AD', '#16A085', '#D35400', '#7F8C8D']
-        circle_colors = ['#3498DB', '#2ECC71', '#F1C40F', '#E74C3C', 
-                        '#9B59B6', '#1ABC9C', '#E67E22', '#95A5A6']
-        
-        # Draw rectangles
-        for i, rect in enumerate(rectangles):
-            color_idx = i % len(rectangle_colors)
-            center_x, center_y, width, height, angle = rect
-            rect_patch = patches.Rectangle(
-                (0, 0), width, height, 
-                angle=angle,
-                linewidth=2,
-                edgecolor='black',
-                facecolor=rectangle_colors[color_idx],
-                alpha=0.7
-            )
-            
-            # Move rectangle to center position
-            transform = (
-                patches.transforms.Affine2D()
-                .rotate_deg(-angle)
-                .translate(-width/2, -height/2)
-                .rotate_deg(angle)
-                .translate(center_x, center_y)
-                + ax.transData
-            )
-            rect_patch.set_transform(transform)
-            ax.add_patch(rect_patch)
-            
-            # Add a numerical label to the shape
-            plt.text(center_x, center_y, str(i+1), 
-                    ha='center', va='center', 
-                    color='white', fontsize=10, fontweight='bold')
-            
-            # Add dimensions if large enough to display
-            if width > 0.3 and height > 0.3:  # Only label larger rectangles
-                size_text = f"{width:.2f}×{height:.2f}m"
-                plt.text(center_x, center_y + 0.15, size_text, 
-                        ha='center', va='center', 
-                        color='white', fontsize=8)
-        
-        # Draw circles
-        for i, circle in enumerate(circles):
-            color_idx = i % len(circle_colors)
-            center_x, center_y, radius = circle
-            circle_patch = patches.Circle(
-                (center_x, center_y), radius,
-                linewidth=2,
-                edgecolor='black',
-                facecolor=circle_colors[color_idx],
-                alpha=0.7
-            )
-            ax.add_patch(circle_patch)
-            
-            # Add a numerical label to the shape
-            label_num = len(rectangles) + i + 1
-            plt.text(center_x, center_y, str(label_num), 
-                    ha='center', va='center', 
-                    color='white', fontsize=10, fontweight='bold')
-            
-            # Add radius if large enough to display
-            if radius > 0.2:  # Only label larger circles
-                size_text = f"r={radius:.2f}m"
-                plt.text(center_x, center_y + 0.1, size_text, 
-                        ha='center', va='center', 
-                        color='white', fontsize=8)
-        
-        # Calculate total area covered by shapes
-        total_rect_area = sum(rect[2] * rect[3] for rect in rectangles)
-        total_circle_area = sum(np.pi * circ[2]**2 for circ in circles)
-        total_area = total_rect_area + total_circle_area
-            
-        # Set title and labels
-        plt.title(f"Floor Plan - {len(rectangles)} Rectangles, {len(circles)} Circles (Total Area: {total_area:.2f}m²)")
-        plt.xlabel('X (meters)')
-        plt.ylabel('Z (meters)')
-        
-        # Set equal aspect ratio and grid
-        plt.axis('equal')
-        plt.grid(True, linestyle='--', alpha=0.4)
-        
-        # Use the same axis limits as the point visualization
-        if tight_crop:
-            plt.xlim(np.min(x) - padding_x, np.max(x) + padding_x)
-            plt.ylim(np.min(z) - padding_z, np.max(z) + padding_z)
-        
-        # Set a light background color
-        ax.set_facecolor('#f8f9fa')
-        
-        # Add a scale bar (1 meter)
-        bar_x = np.min(x) + padding_x * 2
-        bar_y = np.min(z) + padding_z * 2
-        plt.plot([bar_x, bar_x + 1.0], [bar_y, bar_y], 'k-', linewidth=3)
-        plt.text(bar_x + 0.5, bar_y - 0.1, '1 meter', ha='center', va='top')
-        
-        # Save the shape-only image
-        plt.tight_layout()
-        plt.savefig(shape_output_path, dpi=dpi)
-        plt.close()
-        
-        # Also create a simplified floor plan with filled shapes
-        floor_plan_path = os.path.splitext(output_path)[0] + "_floor_plan.png"
-        fig, ax = plt.subplots(figsize=(12, 12), facecolor='white')
-        
-        # Set a white background
-        ax.set_facecolor('white')
-        
-        # Draw rectangles with solid fill
-        for i, rect in enumerate(rectangles):
-            center_x, center_y, width, height, angle = rect
-            rect_patch = patches.Rectangle(
-                (0, 0), width, height, 
-                angle=angle,
-                linewidth=1.5,
-                edgecolor='black',
-                facecolor='lightgray',
-                alpha=1.0
-            )
-            
-            # Move rectangle to center position
-            transform = (
-                patches.transforms.Affine2D()
-                .rotate_deg(-angle)
-                .translate(-width/2, -height/2)
-                .rotate_deg(angle)
-                .translate(center_x, center_y)
-                + ax.transData
-            )
-            rect_patch.set_transform(transform)
-            ax.add_patch(rect_patch)
-        
-        # Draw circles with solid fill
-        for circle in circles:
-            center_x, center_y, radius = circle
-            circle_patch = patches.Circle(
-                (center_x, center_y), radius,
-                linewidth=1.5,
-                edgecolor='black',
-                facecolor='lightgray',
-                alpha=1.0
-            )
-            ax.add_patch(circle_patch)
-        
-        # Set equal aspect ratio
-        plt.axis('equal')
-        plt.axis('off')  # Hide axes
-        
-        # Use the same axis limits as the point visualization
-        if tight_crop:
-            plt.xlim(np.min(x) - padding_x, np.max(x) + padding_x)
-            plt.ylim(np.min(z) - padding_z, np.max(z) + padding_z)
-        
-        # Save the floor plan image
-        plt.tight_layout()
-        plt.savefig(floor_plan_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
-        plt.close()
-        print(f"Floor plan saved to: {floor_plan_path}")
-        
-        # Export shape data to a text file
-        data_output_path = os.path.splitext(output_path)[0] + "_shapes.txt"
-        export_shape_data(rectangles, circles, data_output_path)
-        
-        print(f"Shape-only floor plan saved to: {shape_output_path}")
+    # Clear variables to help with memory management
+    del points, colors, normalized_points, vis_points, vis_colors
+    if fit_shapes:
+        del rectangles, circles, shape_points
     
-    print(f"Visualization saved to: {output_path}")
     return True
 
 def process_single_frame(
@@ -488,6 +325,9 @@ def process_single_frame(
         print(f"[{frame_name}] Removing stray points...")
         cleaned_pcd = remove_stray_points(normalized_pcd, nb_points=20, radius=0.1)
         
+        # Free up memory for the normalized point cloud since we now have the cleaned version
+        del normalized_pcd
+        
         print(f"[{frame_name}] Cleaning shadow artifacts...")
         cleaned_pcd = clean_shadows(cleaned_pcd)
         
@@ -523,12 +363,30 @@ def process_single_frame(
             output_all_files=output_all_files
         )
         
+        # Clean up memory
+        del cleaned_pcd, colors
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # If using PyTorch with CUDA, clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         return True, time.time() - start_time
     
     except Exception as e:
         import traceback
         print(f"Error processing {os.path.basename(image_path)}: {str(e)}")
         traceback.print_exc()
+        
+        # Force cleanup even on error
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         return False, time.time() - start_time
 
 def worker_process(task_queue, result_queue, ground_params_dir, args):
@@ -591,6 +449,14 @@ def worker_process(task_queue, result_queue, ground_params_dir, args):
             # Mark task as done
             task_queue.task_done()
             
+            # Perform explicit garbage collection after each frame
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache if using GPU
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
         except Exception as e:
             import traceback
             print(f"Error in worker: {str(e)}")
@@ -613,7 +479,9 @@ def process_images_to_floor_plans(
     visualize_3d=False,
     num_workers=1,
     simple_output=False,
-    output_all_files=True
+    output_all_files=True,
+    resume=False,
+    force_reprocess=False
 ):
     """
     Process a directory of image frames into floor plans using the most efficient pipeline
@@ -633,6 +501,8 @@ def process_images_to_floor_plans(
         num_workers: Number of parallel workers (0 for sequential processing)
         simple_output: Output simple visualization without shapes or labels
         output_all_files: Whether to output additional files (shapes, floor plan)
+        resume: Whether to resume from previous run (skipping completed frames)
+        force_reprocess: Force reprocessing of all frames even if previously completed
     """
     global stop_processing
     stop_processing = False
@@ -676,7 +546,31 @@ def process_images_to_floor_plans(
         return
     
     total_frames = len(image_paths)
-    print(f"Processing {total_frames} images")
+    print(f"Found {total_frames} images to process")
+    
+    # Create or load the progress tracking file
+    progress_file = os.path.join(output_dir, "processing_progress.json")
+    completed_frames = {}
+    
+    if os.path.exists(progress_file) and resume and not force_reprocess:
+        try:
+            with open(progress_file, 'r') as f:
+                completed_frames = json.load(f)
+            print(f"Loaded progress file: {len(completed_frames)} frames previously processed")
+        except Exception as e:
+            print(f"Error loading progress file: {e}")
+            completed_frames = {}
+    
+    # Filter out already processed frames if resuming
+    if resume and not force_reprocess and completed_frames:
+        original_count = len(image_paths)
+        image_paths = [path for path in image_paths if os.path.basename(path) not in completed_frames]
+        skipped_count = original_count - len(image_paths)
+        print(f"Skipping {skipped_count} already processed frames")
+        total_frames = len(image_paths)
+        if total_frames == 0:
+            print("All frames have already been processed! Nothing to do.")
+            return
     
     # Check for existing ground plane parameters
     ground_params_path = os.path.join(frames_dir, "ground.json")
@@ -712,6 +606,16 @@ def process_images_to_floor_plans(
     # Process frames
     start_time = time.time()
     
+    # Helper function to update progress tracking file
+    def update_progress(frame_path, success):
+        base_name = os.path.basename(frame_path)
+        with open(progress_file, 'w') as f:
+            completed_frames[base_name] = {
+                'success': success,
+                'timestamp': time.time()
+            }
+            json.dump(completed_frames, f, indent=2)
+    
     # Decide whether to use parallel or sequential processing
     if num_workers > 1 and total_frames > 1:
         print(f"Using {num_workers} parallel workers")
@@ -746,25 +650,37 @@ def process_images_to_floor_plans(
             task_queue.put((image_path, i, total_frames))
         
         # Setup progress tracking
-        completed_frames = 0
+        completed_count = 0
         processing_times = []
         
         # Process results as they come in
         try:
-            while completed_frames < total_frames and not stop_processing:
+            while completed_count < total_frames and not stop_processing:
                 try:
                     # Get result with timeout to allow checking for stop signal
                     frame_index, image_path, success, processing_time = result_queue.get(timeout=1)
-                    completed_frames += 1
+                    completed_count += 1
+                    
+                    # Update progress tracking file
+                    if success:
+                        base_name = os.path.basename(image_path)
+                        completed_frames[base_name] = {
+                            'success': success,
+                            'timestamp': time.time()
+                        }
+                        # Save progress periodically (every 5 frames)
+                        if completed_count % 5 == 0 or completed_count == total_frames:
+                            with open(progress_file, 'w') as f:
+                                json.dump(completed_frames, f, indent=2)
                     
                     # Update progress
                     if success:
                         processing_times.append(processing_time)
                         avg_time = sum(processing_times) / len(processing_times)
-                        remaining_frames = total_frames - completed_frames
+                        remaining_frames = total_frames - completed_count
                         estimated_remaining_time = avg_time * remaining_frames
                         
-                        print(f"Progress: {completed_frames}/{total_frames} frames, " 
+                        print(f"Progress: {completed_count}/{total_frames} frames, " 
                             f"Avg: {avg_time:.2f}s/frame, "
                             f"Remaining: {estimated_remaining_time/60:.1f} minutes")
                 except queue.Empty:
@@ -773,6 +689,9 @@ def process_images_to_floor_plans(
         except KeyboardInterrupt:
             stop_processing = True
             print("\nInterrupted! Finishing current tasks and shutting down...")
+            # Save progress before exiting
+            with open(progress_file, 'w') as f:
+                json.dump(completed_frames, f, indent=2)
         
         # Close down
         for worker in workers:
@@ -810,6 +729,16 @@ def process_images_to_floor_plans(
                 output_all_files=output_all_files
             )
             
+            # Update progress tracking file
+            if success:
+                completed_frames[base_name] = {
+                    'success': success,
+                    'timestamp': time.time()
+                }
+                # Save progress after each frame
+                with open(progress_file, 'w') as f:
+                    json.dump(completed_frames, f, indent=2)
+            
             # Estimate remaining time
             elapsed_time = time.time() - start_time
             frames_processed = idx + 1
@@ -823,6 +752,10 @@ def process_images_to_floor_plans(
     
     total_time = time.time() - start_time
     print(f"Processing complete! {total_frames} frames processed in {total_time/60:.2f} minutes")
+    
+    # Final save of progress file
+    with open(progress_file, 'w') as f:
+        json.dump(completed_frames, f, indent=2)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process image frames to floor plans in a single pipeline")
@@ -867,6 +800,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=0,
                        help="Number of parallel worker processes (0 for sequential processing)")
     
+    # Resume processing options
+    parser.add_argument("--resume", action="store_true",
+                       help="Resume processing, skipping frames that were already completed")
+    parser.add_argument("--force_reprocess", action="store_true",
+                       help="Force reprocessing of all frames, even if previously completed")
+    
     args = parser.parse_args()
     
     # Set number of threads for numpy and OpenMP if specified
@@ -906,7 +845,9 @@ if __name__ == "__main__":
             visualize_3d=args.visualize_3d,
             num_workers=args.num_workers,
             simple_output=args.simple_output,
-            output_all_files=not args.output_main_only
+            output_all_files=not args.output_main_only,
+            resume=args.resume,
+            force_reprocess=args.force_reprocess
         )
     except KeyboardInterrupt:
         print("\nProcessing interrupted by user.")
